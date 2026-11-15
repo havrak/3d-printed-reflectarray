@@ -27,7 +27,8 @@ memoize.memo.dir
 temp_files
 dependencies.lock
 print_test_stl
-knowledge_base/
+knowledge-base/
+*__pycache__*
 *-blx.bib
 .knowledge_base_resolved
 simulations/cst/feasibility_study_elip_void
