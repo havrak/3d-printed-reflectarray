@@ -40,10 +40,12 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import config
+import band_features as bandfeat
 import features as feat
 import metadata
 import rotation
 import touchstone
+from band_features import BandContext
 
 
 # --------------------------------------------------------------------------- #
@@ -66,12 +68,14 @@ class Sample:
     # targets at f0
     r_major: complex
     r_minor: complex
-    # diagnostics
+    # diagnostics; theta_star is NaN for circular cells (see rotation.py)
     theta_star_deg: float
     residual_linear: float
     residual_relative: float
-    # band descriptors; empty when --no-band
-    band: dict[str, float] = field(default_factory=dict)
+    # band context for band_features.py; None when --no-band
+    band_ctx: BandContext | None = None
+    # the phase-slope target, extracted from the band context
+    dphi_df: float = float("nan")
     # rejection bookkeeping
     reject: str | None = None
 
@@ -111,16 +115,35 @@ def load_sweep_dir(
     samples: list[Sample] = []
     for path in s2p_files:
         run_id = touchstone.parse_run_id(path.name)
-        record = records.get(run_id) if run_id is not None else None
 
+        if run_id is None:
+            print(f"  SKIP {directory.name}/{path.name}: "
+                  f"no run id in filename (expected '...RunID_<id>.s2p')")
+            log["missing_metadata"] += 1
+            continue
+
+        record = records.get(run_id)
         if record is None:
+            present = sorted(records)[:3]
+            print(f"  SKIP {directory.name}/{path.name}: run id {run_id} "
+                  f"absent from {csv_path.name} "
+                  f"({len(records)} rows, first ids {present})")
+            log["missing_metadata"] += 1
+            continue
+
+        # Report which specific fields the CSV failed to supply, so a broken
+        # annotation can be traced to a particular row and column.
+        missing = [k for k in REQUIRED_PARAMS if not np.isfinite(record.get(k))]
+        if missing:
+            print(f"  SKIP {directory.name}/{path.name}: run id {run_id} has "
+                  f"non-numeric/missing {missing} in {csv_path.name}")
             log["missing_metadata"] += 1
             continue
 
         try:
             ts = touchstone.parse_touchstone(path)
         except ValueError as exc:
-            print(f"  {path.name}: {exc}")
+            print(f"  SKIP {directory.name}/{path.name}: {exc}")
             log["parse_error"] += 1
             continue
 
@@ -133,16 +156,16 @@ def load_sweep_dir(
             step_deg=config.THETA_SCAN_STEP_DEG,
         )
 
-        band: dict[str, float] = {}
+        band_ctx: BandContext | None = None
         if with_band and ts.is_multifrequency:
             fixed = rotation.rotate_at_angle(
                 ts.s11, ts.s22, ts.s12, ts.s21, basis.theta_star_deg,
             )
-            phi_major_band = np.rad2deg(np.angle(fixed[0]))
-            mag_major_band = np.abs(fixed[0])
-            band = feat.band_descriptors(
-                ts.freq_ghz, phi_major_band, mag_major_band,
-                f0_ghz,
+            band_ctx = BandContext(
+                freq_ghz=ts.freq_ghz,
+                phi_major_deg=np.rad2deg(np.angle(fixed[0])),
+                mag_major=np.abs(fixed[0]),
+                f0_ghz=f0_ghz,
                 slope_step_ghz=config.BAND_SLOPE_DF_GHZ,
                 resonance_dip_db=config.RESONANCE_DIP_DB,
             )
@@ -158,10 +181,17 @@ def load_sweep_dir(
             h_base_mm=record.get("H_base", 0.0),
             r_major=basis.r_major,
             r_minor=basis.r_minor,
-            theta_star_deg=basis.theta_star_deg,
+            # For a circular cross-section the cell is rotationally symmetric,
+            # so the eigenbasis is degenerate and theta* is decided by
+            # floating-point noise. Store NaN rather than a meaningless number.
+            theta_star_deg=(float("nan")
+                            if abs(record.get("ratio") - 1.0) <= config.CIRCULAR_TOL
+                            else basis.theta_star_deg),
             residual_linear=basis.residual_linear,
             residual_relative=basis.residual_relative,
-            band=band,
+            band_ctx=band_ctx,
+            dphi_df=(bandfeat.feat_dphi_df(band_ctx)
+                     if band_ctx is not None else float("nan")),
         ))
 
     return samples
@@ -202,6 +232,7 @@ def validate(samples: list[Sample], lam0_mm: float) -> list[Sample]:
 
     angle_ok = rotation.angle_matches_rotation(
         theta, config.ELLIPSE_ROTATION_DEG, config.THETA_STAR_TOL_DEG,
+        ratio=ratio, circular_tol=config.CIRCULAR_TOL,
     )
     resid_ok = np.isfinite(resid_lin) & (resid_lin <= config.RESIDUAL_MAX_LINEAR)
 
@@ -211,12 +242,10 @@ def validate(samples: list[Sample], lam0_mm: float) -> list[Sample]:
         for s in samples
     ])
 
-    # The phase-slope target is only defined when band descriptors were
-    # computed. Samples carrying an empty band dict, or a NaN slope, cannot
-    # supply the fifth target and are dropped rather than fed as NaN.
-    finite_slope = np.array([
-        np.isfinite(s.band.get("dphi_df", np.nan)) for s in samples
-    ])
+    # The phase-slope target is only defined when a band context was built.
+    # Samples without one cannot supply the fifth target and are dropped
+    # rather than fed as NaN.
+    finite_slope = np.array([np.isfinite(s.dphi_df) for s in samples])
 
     for i, s in enumerate(samples):
         if not has_meta[i]:
@@ -239,6 +268,14 @@ def validate(samples: list[Sample], lam0_mm: float) -> list[Sample]:
 # Assembly
 # --------------------------------------------------------------------------- #
 
+def _resolve(module, name: str):
+    """Look up a transform function by name in the given module."""
+    fn = getattr(module, name, None)
+    if fn is None:
+        raise AttributeError(f"{module.__name__} has no feature function '{name}'")
+    return fn
+
+
 def build_arrays(samples: list[Sample]) -> dict[str, np.ndarray]:
     """Turn the surviving samples into the arrays the surrogate consumes."""
     geom = feat.RawGeometry(
@@ -252,10 +289,24 @@ def build_arrays(samples: list[Sample]) -> dict[str, np.ndarray]:
 
     names: list[str] = []
     columns: list[np.ndarray] = []
-    for name, fn in config.FEATURE_TRANSFORMS:
+    for name, fn_name in config.FEATURE_TRANSFORMS:
+        fn = _resolve(feat, fn_name)
         names.append(name)
         columns.append(np.asarray(fn(geom, config.LAMBDA0_MM), dtype=float))
     X = np.column_stack(columns) if columns else np.zeros((len(geom), 0))
+
+    # Band-derived features: each takes a BandContext and returns one scalar.
+    # Samples without a context (--no-band) contribute NaN rather than being
+    # silently dropped here; the no_slope filter has already removed them when
+    # dphi_df is an active target.
+    band_cols: list[np.ndarray] = []
+    for name, fn_name in config.BAND_FEATURE_TRANSFORMS:
+        fn = _resolve(bandfeat, fn_name)
+        band_cols.append(np.array(
+            [fn(s.band_ctx) if s.band_ctx is not None else np.nan
+             for s in samples],
+            dtype=float,
+        ))
 
     X_raw = np.column_stack([
         geom.a_mm, geom.ratio, geom.p_ratio, geom.eps_r,
@@ -273,12 +324,15 @@ def build_arrays(samples: list[Sample]) -> dict[str, np.ndarray]:
         [s.r_major.imag for s in samples],
         [s.r_minor.real for s in samples],
         [s.r_minor.imag for s in samples],
-        [s.band.get("dphi_df", np.nan) for s in samples],
+        [s.dphi_df for s in samples],
     ])
 
-    band_names = list(samples[0].band.keys()) if samples and samples[0].band else []
-    band = (np.column_stack([[s.band[k] for s in samples] for k in band_names])
-            if band_names else np.zeros((len(samples), 0)))
+    # Band-derived features, kept as a separate array so they can be inspected
+    # independently of the geometry features. Each is computed by a function in
+    # band_features.py taking a BandContext.
+    band_names = [name for name, _ in config.BAND_FEATURE_TRANSFORMS]
+    band = (np.column_stack(band_cols) if band_cols
+            else np.zeros((len(samples), 0)))
 
     meta = {
         "source_dir": np.array([s.source_dir for s in samples]),

@@ -1,94 +1,191 @@
 """
-Band descriptors derived from a multi-frequency Touchstone export.
+Geometry-derived input features.
 
-The .s2p covers a narrow band around the design frequency (1 GHz at 30 GHz in
-the current sweeps). Collapsing that band to a single scalar is fragile: a
-resonance may or may not fall inside it, so the scalar is not comparable
-across samples.
+Everything here maps a per-sample geometry to one feature column. Each transform
+takes a `RawGeometry` (arrays over samples) and the design wavelength, and
+returns one array of the same length.
 
-Instead every sample carries three descriptors that are always well defined:
+The feature set actually used is selected in `config.py`; this module only
+provides the functions. To add a feature, define it here and register it there.
 
-    dphi_df           local phase slope at f0, deg/GHz  (central difference)
-    band_spread       max - min of the major-axis phase over the band, deg
-    resonance_in_band 1 if |S| dips below a threshold inside the band, else 0
+All features are normalised to the design frequency, so that the 30 -> 15 GHz
+scaling leaves them invariant. Raw millimetre values are deliberately not used
+as features; the un-transformed geometry is kept separately in `X_raw` for
+provenance.
 
-`band_spread` is the honest wideband measure: it is the phase variation the
-element would show if used over the band, and the absence of a resonance gives
-a small value, which is correct rather than missing. `resonance_in_band` is a
-flag for filtering, not a feature, precisely so that "no resonance" does not
-turn into a ragged array.
+Band-derived features live in `band_features.py`.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 
-def phase_slope_at(
-    freq_ghz: np.ndarray,
-    phase_deg: np.ndarray,
-    f0_ghz: float,
-    step_ghz: float = 0.1,
-) -> float:
+@dataclass
+class RawGeometry:
+    """Raw per-sample geometry, before any transform. Length = n_samples."""
+
+    a_mm: np.ndarray          # ellipse semi-major axis, mm
+    ratio: np.ndarray         # a / b, >= 1
+    p_ratio: np.ndarray       # cell size as a fraction of lambda0 (0.5 = lambda0/2)
+    eps_r: np.ndarray         # relative permittivity
+    h_pillar_mm: np.ndarray   # pillar height, absolute mm
+    h_base_mm: np.ndarray     # base layer thickness, absolute mm
+
+    def __len__(self) -> int:
+        return int(self.a_mm.shape[0])
+
+    @property
+    def b_mm(self) -> np.ndarray:
+        """Semi-minor axis, from a and the aspect ratio."""
+        return self.a_mm / self.ratio
+
+
+def cell_mm_of(g: RawGeometry, lam0: float) -> np.ndarray:
+    """Cell side length in mm, from the normalised footprint."""
+    return g.p_ratio * lam0
+
+
+def _lambda_g_factor(eps_r: np.ndarray) -> np.ndarray:
+    """sqrt(eps_r): converts physical length to electrical length in the medium."""
+    return np.sqrt(eps_r)
+
+
+# --------------------------------------------------------------------------- #
+# Cell and ellipse geometry
+# --------------------------------------------------------------------------- #
+
+def feat_p_ratio(g: RawGeometry, lam0: float) -> np.ndarray:
     """
-    Local phase slope at f0 in deg/GHz, by central difference.
+    Cell footprint as a fraction of the design wavelength.
 
-    The phase is unwrapped first: a wrapped phase would turn a small slope into
-    a ±360 deg jump. Returns NaN when the band does not contain f0 ± step.
+    This is the electrical size of the cell, and it is not recoverable from the
+    fill fraction: two cells can share a fill fraction while having different
+    electrical size. It matters because it sets the mutual coupling between
+    adjacent elements, the grating-lobe threshold, and the lateral cutoff of
+    the modes trapped in the cell, all of which shift the phase response.
     """
-    if freq_ghz.size < 2:
-        return float("nan")
-
-    unwrapped = np.rad2deg(np.unwrap(np.deg2rad(phase_deg)))
-
-    lo, hi = f0_ghz - step_ghz, f0_ghz + step_ghz
-    inside = (freq_ghz >= lo) & (freq_ghz <= hi)
-    if np.count_nonzero(inside) < 2:
-        return float("nan")
-
-    slope, _ = np.polyfit(freq_ghz[inside], unwrapped[inside], 1)
-    return float(slope)
+    return g.p_ratio
 
 
-def band_spread(phase_deg: np.ndarray) -> float:
+def feat_a_over_P(g: RawGeometry, lam0: float) -> np.ndarray:
     """
-    Peak-to-peak phase variation across the whole band, deg.
+    Semi-major axis relative to the cell size, a / P.
 
-    Unwrapped so that a genuine 300 degree excursion is reported as 300, not
-    as the 60 degrees left after wrapping.
+    The ellipse is described relative to the cell rather than in millimetres
+    because the lateral boundary condition and the coupling to neighbours are
+    governed by how much of the cell the pillar occupies, not by its absolute
+    physical size. This also makes the feature invariant under the frequency
+    scaling, which a raw millimetre value would not be.
+
+    Retained directly despite being closely related to the fill fraction: the
+    phase response is not monotonic in `a` (it rises through resonance and then
+    falls), so the network needs this coordinate itself to locate the
+    resonance.
     """
-    if phase_deg.size == 0:
-        return float("nan")
-    unwrapped = np.rad2deg(np.unwrap(np.deg2rad(phase_deg)))
-    return float(np.ptp(unwrapped))
+    cell_mm = cell_mm_of(g, lam0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return g.a_mm / cell_mm
 
 
-def has_resonance(mag_major: np.ndarray, dip_db: float = -3.0) -> int:
+def feat_fill_fraction(g: RawGeometry, lam0: float) -> np.ndarray:
     """
-    1 when the major-axis reflection dips below `dip_db` inside the band.
+    Ellipse area divided by cell area, pi a b / P^2.
 
-    A resonance shows up as a notch in |S|; this is the robust indicator. It is
-    returned as an integer flag rather than a float, and as an ordinal 0/1 so
-    that it can be used for filtering without introducing NaN.
+    This is the dielectric loading of the cell and the quantity that sets its
+    effective permittivity, so it is much closer to physics than the semi-axis
+    length alone. Dimensionless and frequency-invariant, since a, b and P all
+    scale together.
     """
-    if mag_major.size == 0:
-        return 0
-    with np.errstate(divide="ignore"):
-        mag_db = 20.0 * np.log10(np.maximum(mag_major, 1e-12))
-    return int(np.any(mag_db < dip_db))
+    cell_mm = cell_mm_of(g, lam0)
+    return np.pi * g.a_mm * g.b_mm / (cell_mm ** 2)
 
 
-def band_descriptors(
-    freq_ghz: np.ndarray,
-    phi_major_deg: np.ndarray,
-    mag_major: np.ndarray,
-    f0_ghz: float,
-    slope_step_ghz: float = 0.1,
-    resonance_dip_db: float = -3.0,
-) -> dict[str, float]:
-    """All three descriptors for one sample, keyed by their feature names."""
-    return {
-        "dphi_df": phase_slope_at(freq_ghz, phi_major_deg, f0_ghz, slope_step_ghz),
-        "band_spread": band_spread(phi_major_deg),
-        "resonance_in_band": float(has_resonance(mag_major, resonance_dip_db)),
-    }
+# --------------------------------------------------------------------------- #
+# Electrical heights
+# --------------------------------------------------------------------------- #
+
+def feat_h_pillar_electrical(g: RawGeometry, lam0: float) -> np.ndarray:
+    """
+    Pillar height in electrical wavelengths inside the dielectric.
+
+    The reflection phase of a grounded dielectric slab is governed by its
+    electrical height rather than its physical height, so normalising by
+    lambda0 and by the refractive index sqrt(eps_r) makes the feature
+    scale-free and collapses two independent variables into the one that
+    matters.
+    """
+    return (g.h_pillar_mm / lam0) * _lambda_g_factor(g.eps_r)
+
+
+def feat_h_base_electrical(g: RawGeometry, lam0: float) -> np.ndarray:
+    """
+    Base thickness in electrical wavelengths inside the dielectric.
+
+    Carried separately from the pillar because the base is a structural
+    element whose thickness is not required to scale with the cell. If it is
+    held constant while the frequency halves, the stack is no longer a scaled
+    copy of itself, and this feature has to expose that.
+    """
+    return (g.h_base_mm / lam0) * _lambda_g_factor(g.eps_r)
+
+
+# --------------------------------------------------------------------------- #
+# Material and anisotropy
+# --------------------------------------------------------------------------- #
+
+def feat_eps_r(g: RawGeometry, lam0: float) -> np.ndarray:
+    """Relative permittivity itself, which sets the Q of the resonator."""
+    return g.eps_r
+
+
+def feat_ratio(g: RawGeometry, lam0: float) -> np.ndarray:
+    """
+    Ellipse aspect ratio a / b, the direct geometric anisotropy parameter.
+
+    Kept linear rather than logarithmic. The physical chain from geometry to
+    phase difference is
+
+        a/b  ->  shape  ->  N_a, N_b  ->  eps_eff  ->  delta_phi
+
+    and every step is algebraic or rational, none exponential or logarithmic,
+    so there is no mechanism that would make the response logarithmic in
+    elongation. A log would also degrade relative precision exactly where the
+    sampling is densest (ratio near 1, where ln -> 0).
+
+    The depolarisation factors are deliberately not carried as separate
+    features: they are deterministic functions of the ratio alone, and their
+    effect enters through the effective permittivities.
+    """
+    return g.ratio
+
+
+# --------------------------------------------------------------------------- #
+# Effective-medium derived
+# --------------------------------------------------------------------------- #
+#
+# These follow Sihvola's anisotropic Maxwell-Garnett rule, with the
+# depolarisation factors of an elliptical cylinder taken from Zhang & Wu.
+# See effective_medium.py for the derivation.
+
+
+def _effective_permittivities(g: RawGeometry, lam0: float):
+    """Shared intermediate: fill fraction and both effective permittivities."""
+    import effective_medium as em
+
+    fill = feat_fill_fraction(g, lam0)
+    return em.effective_permittivities(g.a_mm, g.b_mm, g.eps_r, fill)
+
+
+def feat_eps_eff_major(g: RawGeometry, lam0: float) -> np.ndarray:
+    """Effective permittivity along the ellipse major axis (Maxwell-Garnett)."""
+    eps_major, _ = _effective_permittivities(g, lam0)
+    return eps_major
+
+
+def feat_eps_eff_minor(g: RawGeometry, lam0: float) -> np.ndarray:
+    """Effective permittivity along the ellipse minor axis (Maxwell-Garnett)."""
+    _, eps_minor = _effective_permittivities(g, lam0)
+    return eps_minor

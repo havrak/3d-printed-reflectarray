@@ -166,6 +166,8 @@ def angle_matches_rotation(
     theta_star_deg: np.ndarray,
     expected_deg: float,
     tol_deg: float,
+    ratio: np.ndarray | None = None,
+    circular_tol: float = 1e-3,
 ) -> np.ndarray:
     """
     True where the recovered eigenbasis angle matches the geometric rotation.
@@ -173,6 +175,30 @@ def angle_matches_rotation(
     The comparison is modulo 90 degrees, because a rotation by theta and
     theta + 90 swap which principal axis is which but describe the same
     physical basis.
+
+    *Circular cells are exempt.* At ratio = 1 the cross-section is a circle and
+    the cell is rotationally symmetric, so the reflection operator is isotropic
+    and every angle is equally valid: the off-diagonal energy is flat in theta
+    and the argmin is decided by floating-point noise. The recovered angle is
+    then meaningless and must not be used as a validity test. Passing `ratio`
+    marks those samples as valid regardless of `theta_star`; `theta_star_deg`
+    may legitimately be NaN for them.
     """
-    delta = np.mod(theta_star_deg - expected_deg + 45.0, 90.0) - 45.0
-    return np.abs(delta) <= tol_deg
+    theta_star_deg = np.asarray(theta_star_deg, dtype=float)
+    ok = np.zeros(theta_star_deg.shape, dtype=bool)
+
+    if ratio is None:
+        delta = np.mod(theta_star_deg - expected_deg + 45.0, 90.0) - 45.0
+        return np.abs(delta) <= tol_deg
+
+    ratio = np.asarray(ratio, dtype=float)
+    circular = np.abs(ratio - 1.0) <= circular_tol
+
+    # Only evaluate the angle test where it is meaningful; NaN propagates
+    # harmlessly into the non-circular branch otherwise.
+    with np.errstate(invalid="ignore"):
+        delta = np.mod(theta_star_deg - expected_deg + 45.0, 90.0) - 45.0
+        ok = np.abs(delta) <= tol_deg
+
+    ok = np.where(circular, True, ok)
+    return ok
