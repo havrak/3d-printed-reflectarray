@@ -17,7 +17,7 @@ from pathlib import Path
 
 # Root scanned recursively for result_navigator.csv files. Relative to the
 # repository root; scripts resolve it against the repo, not the cwd.
-DEFAULT_DATA_ROOT = Path("feasibility study/simulations/data")
+DEFAULT_DATA_ROOT = Path("simulations/data/pillar/later_simulations")
 
 NAVIGATOR_NAME = "result_navigator.csv"
 
