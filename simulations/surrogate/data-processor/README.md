@@ -38,9 +38,9 @@ navigator CSV. The join key is the run id in the filename
 
 | key | shape | meaning |
 |---|---|---|
-| `X` | `(n, f)` | transformed input features |
+| `X` | `(n, 9)` | transformed input features |
 | `X_raw` | `(n, 6)` | raw geometry: `a_mm, ratio, p_ratio, eps_r, h_pillar_mm, h_base_mm` |
-| `Y` | `(n, 4)` | `Re/Im` of `R_major` then `R_minor` at f0 |
+| `Y` | `(n, 5)` | `Re/Im` of `R_major`, `Re/Im` of `R_minor`, then `dphi_df` |
 | `band` | `(n, 3)` | `dphi_df`, `band_spread`, `resonance_in_band` |
 | `feature_names`, `raw_names`, `target_names`, `band_names` | | column labels |
 | `source_dir`, `run_id` | `(n,)` | provenance |
@@ -62,21 +62,70 @@ delta_phi = np.rad2deg(np.angle(r_minor * np.conj(r_major)))   # wrap-safe
 
 ## Feature transforms
 
-Defined in `config.FEATURE_TRANSFORMS`, applied in order, one column each:
+Defined in `config.FEATURE_TRANSFORMS`, applied in order, one column each.
+
+**Geometric / material:**
 
 | feature | expression | rationale |
 |---|---|---|
+| `p_ratio` | `P / lambda0` | electrical size of the cell; coupling, grating lobes |
+| `a_over_P` | `a / P` | normalised ellipse size; locates the resonance |
 | `fill_fraction` | `pi*a*b / P^2` | dielectric loading of the cell |
 | `h_pillar_electrical` | `(H_pillar/l0)*sqrt(eps_r)` | electrical height, scale-free |
 | `h_base_electrical` | `(H_base/l0)*sqrt(eps_r)` | same, for the base layer |
-| `log_ratio` | `ln(a/b)` | anisotropy strength, near-log response |
+| `ratio` | `a/b` | geometric elongation; drives `delta_phi` |
 | `eps_r` | `eps_r` | resonator Q |
 
-Add or replace a feature by editing that list; nothing else changes.
+**Effective-medium derived** (from `effective_medium.py`, closed form):
 
-`H_pillar` and `H_base` are stored in absolute mm in the CSVs while `a` and
-`P_ratio` are normalised. The transforms above divide by `lambda0` so every
-feature is invariant under the 30 GHz -> 15 GHz frequency scaling.
+| feature | expression | rationale |
+|---|---|---|
+| `eps_eff_major` | Maxwell-Garnett with `N_a`, `f` | dielectric loading seen by the major axis |
+| `eps_eff_minor` | Maxwell-Garnett with `N_b`, `f` | ditto, other axis |
+
+### Effective-medium model
+
+The pillar is modelled as an **elliptical cylinder**, not a prolate spheroid: it
+has a constant elliptical cross-section and flat ends, so the cylinder is the
+correct shape class. Its depolarisation factors are
+
+```
+N_a = b / (a + b),   N_b = a / (a + b),   N_z = 0
+```
+
+with `N_a + N_b + N_z = 1`. Limits: `a = b` gives `(1/2, 1/2, 0)` (circular
+cylinder), `b -> 0` gives `(0, 1, 0)` (thin strip).
+
+These enter the anisotropic Maxwell-Garnett rule, which for air as host
+(`eps_m = 1`) and the printed dielectric as inclusion (`eps_p = eps_r`) is
+
+```
+eps_eff,j = (1 + (eps_r - 1)*(N_j + f*(1 - N_j))) / (1 + (eps_r - 1)*N_j*(1 - f))
+```
+
+with `f = pi*a*b / P^2`. The two axes use `N_a` and `N_b` respectively, which is
+what makes the result anisotropic: a plain weighted average would return the
+same value for both, since `f` is shared, and could not produce
+`eps_eff_major != eps_eff_minor`.
+
+Sources: Sihvola (1999) for why depolarisation factors enter the theory and for
+the anisotropic Maxwell-Garnett rule; Zhang & Wu, *Sci. Rep.* 4, 7892 (2014) for
+the elliptical-cylinder factors.
+
+This is an **analogy used to generate features, not a predictive model**. Three
+departures from the assumptions: Maxwell-Garnett wants dilute separated
+inclusions, whereas the pillar is one connected object at a few tenths fill
+fraction; the structure is backed by a ground plane; and the dielectric base
+layer is not part of the mixture at all. The ground plane changes the absolute
+phase but not the lateral anisotropy, and the base affects both polarisations
+identically, so neither alters the anisotropy these features encode. The base
+thickness is carried as its own input feature instead.
+
+Add or replace a feature by editing `FEATURE_TRANSFORMS`; nothing else changes.
+
+`H_pillar` and `H_base` are stored in absolute mm in the CSVs while `a`,
+`ratio` and `P_ratio` are normalised. The transforms above divide by `lambda0`
+so every feature is invariant under the 30 GHz -> 15 GHz frequency scaling.
 
 ## Filters
 
@@ -90,6 +139,7 @@ failure and the reason is counted.
 | `eigenbasis_angle` | `theta_star` deviates from 45 deg by more than 10 deg |
 | `eigenbasis_residual` | linear residual above `RESIDUAL_MAX_LINEAR` |
 | `nonfinite` | a target came out NaN or inf |
+| `no_slope` | `dphi_df` unavailable (band descriptors skipped or uncomputable) |
 
 The clearance test uses the axis-aligned bounding box of a 45-degree rotated
 ellipse, `sqrt((a^2 + b^2)/2)`, which is correct for both directions because

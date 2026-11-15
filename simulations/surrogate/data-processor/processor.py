@@ -211,6 +211,13 @@ def validate(samples: list[Sample], lam0_mm: float) -> list[Sample]:
         for s in samples
     ])
 
+    # The phase-slope target is only defined when band descriptors were
+    # computed. Samples carrying an empty band dict, or a NaN slope, cannot
+    # supply the fifth target and are dropped rather than fed as NaN.
+    finite_slope = np.array([
+        np.isfinite(s.band.get("dphi_df", np.nan)) for s in samples
+    ])
+
     for i, s in enumerate(samples):
         if not has_meta[i]:
             s.reject = "missing_metadata"
@@ -222,6 +229,8 @@ def validate(samples: list[Sample], lam0_mm: float) -> list[Sample]:
             s.reject = "eigenbasis_residual"
         elif not finite_targets[i]:
             s.reject = "nonfinite"
+        elif not finite_slope[i]:
+            s.reject = "no_slope"
 
     return samples
 
@@ -253,14 +262,18 @@ def build_arrays(samples: list[Sample]) -> dict[str, np.ndarray]:
         geom.h_pillar_mm, geom.h_base_mm,
     ])
 
-    # Targets: real and imaginary parts of both principal coefficients.
-    # Predicting the complex coefficient rather than the phase avoids the
-    # 0/360 degree wrap discontinuity, which no regressor can learn across.
+    # Targets: the four real/imaginary components of the two principal
+    # reflection coefficients at f0, plus the major-axis phase slope.
+    # Predicting complex coefficients rather than phase avoids the 0/360
+    # wrap discontinuity, which no regressor can learn across.
+    # The slope is an auxiliary target: it is a bandwidth proxy, so the
+    # network represents the frequency behaviour rather than a single point.
     Y = np.column_stack([
         [s.r_major.real for s in samples],
         [s.r_major.imag for s in samples],
         [s.r_minor.real for s in samples],
         [s.r_minor.imag for s in samples],
+        [s.band.get("dphi_df", np.nan) for s in samples],
     ])
 
     band_names = list(samples[0].band.keys()) if samples and samples[0].band else []
@@ -286,7 +299,7 @@ def build_arrays(samples: list[Sample]) -> dict[str, np.ndarray]:
         ]),
         "band_names": np.array(band_names),
         "target_names": np.array([
-            "re_major", "im_major", "re_minor", "im_minor",
+            "re_major", "im_major", "re_minor", "im_minor", "dphi_df",
         ]),
         **meta,
     }
@@ -308,8 +321,9 @@ def main(argv: list[str] | None = None) -> int:
 
     root: Path = args.root
     if not root.is_absolute():
-        # resolve relative to the repository root, i.e. four levels up from here
-        root = (Path(__file__).resolve().parents[4] / root)
+        # resolve relative to the repository root: processor.py lives at
+        # <root>/simulations/surrogate/data-processor/processor.py
+        root = (Path(__file__).resolve().parents[3] / root)
     if not root.is_dir():
         print(f"error: data root not found: {root}")
         return 1
