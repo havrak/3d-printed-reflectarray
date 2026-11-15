@@ -11,15 +11,18 @@ Hierarchy, outermost first:
 
 Usage
 -----
-    python stats.py <directory>
-    python stats.py <directory> --csv out.csv --png out.png --top 60
-    python stats.py <directory> --no-png          # table only
+    python stats.py                          # default data root, outputs to cwd
+    python stats.py <directory>              # positional root
+    python stats.py --root <directory>       # same, named form
+    python stats.py --root <dir> --out plots/
+    python stats.py <dir> --csv out.csv --png out.svg --top 60
+    python stats.py <dir> --no-png           # table only
 
 Outputs
 -------
     console   the tree table and the summary block
     CSV       one row per leaf, for grepping
-    PNG       the same table plus a summary panel, one page
+    image     the same table plus a summary panel, one page
 
 Only the navigator CSV is read; the .s2p files are not touched, so this is
 fast even on a large tree.
@@ -32,304 +35,38 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# --------------------------------------------------------------------------- #
-# Configuration
-# --------------------------------------------------------------------------- #
+# Allow `python stats.py` from inside this directory as well as `-m`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-NAVIGATOR_NAME = "result_navigator.csv"
+import config
+import common
 
-# Nesting order, outermost first. `a` is the tuning variable shown per leaf.
-LEVELS = ["P_ratio", "epsilon_r", "H_pillar", "ratio"]
-TUNING = "a"
+# Loading, CSV parsing and the geometry rule now live in common.py so that
+# coverage_stats.py reads the tree identically. These aliases keep the rest of
+# this file unchanged.
+NAVIGATOR_NAME = config.NAVIGATOR_NAME
+LEVELS = config.LEVELS
+TUNING = config.TUNING
+VALUE_TOL = config.VALUE_TOL
+SUMMARY_WRAP_COLS = config.SUMMARY_WRAP_COLS
+LEV_SEP = config.LEV_SEP
 
-# Values closer than this are treated as equal, so that 2.2 and 2.2000001
-# produced by different export paths do not split a group.
-VALUE_TOL = 1e-6
+LAMBDA0_MM = config.LAMBDA0_MM
+GEOMETRIC_CLEARANCE_MM = 0.0
+EDGE_MARGIN_MM = config.EDGE_MARGIN_MM
+TARGET_STEP_MM = config.TARGET_STEP_MM
 
-# Maximum characters per line in the summary panel. Long per-level value lists
-# are wrapped to this width instead of being truncated with an ellipsis, so the
-# figure never grows past what a page can hold.
-SUMMARY_WRAP_COLS = 78
-
-# Separator printed around each entry of the "largest relative gaps" block, so
-# consecutive configurations are visually distinct now that each spans several
-# short lines.
-LEV_SEP = "-" * 30
-
-# ---- geometry limit -------------------------------------------------------
-#
-# The ellipse major axis is rotated 45 degrees, so its axis-aligned bounding
-# box half-extent is sqrt((a^2 + b^2)/2) with b = a/ratio. Requiring that to
-# stay inside the cell gives the largest usable semi-major axis:
-#
-#     sqrt((a^2 + (a/ratio)^2)/2) <= P/2
-#     a <= (P/2) * sqrt(2) / sqrt(1 + 1/ratio^2)
-#
-# A larger ratio therefore permits a longer major axis, which is why a sweep
-# that shares one upper limit across several ratios never reaches the edge for
-# the more elongated ones.
-#
-# GEOMETRIC_CLEARANCE_MM is the allowed gap between the ellipse bounding box
-# and the cell wall. It is NOT the manufacturability clearance used elsewhere:
-# 0.2 mm in dataExplorer reflects what an FDM nozzle can print, whereas for
-# coverage of the surrogate's input domain the ellipse may legitimately touch
-# the wall, since such a cell is still geometrically valid. Keep this at zero
-# unless a specific study needs headroom.
-C0_MM_GHZ = 299.792458      # mm * GHz
-F0_GHZ = 30.0
-LAMBDA0_MM = C0_MM_GHZ / F0_GHZ
-GEOMETRIC_CLEARANCE_MM = 0.0    # purely geometric; not a print constraint
-EDGE_MARGIN_MM = 0.01           # stay just inside the limit, for rounding
-TARGET_STEP_MM = 0.02           # largest acceptable spacing of new samples
-
-
-def max_major_axis(
-    p_ratio: float,
-    ratio: float,
-    clearance_mm: float = GEOMETRIC_CLEARANCE_MM,
-) -> float:
-    """Largest semi-major axis whose bounding box still fits inside the cell."""
-    cell_mm = p_ratio * LAMBDA0_MM
-    half = cell_mm / 2.0 - clearance_mm
-    if half <= 0 or ratio <= 0:
-        return float("nan")
-    return half * (2.0 ** 0.5) / (1.0 + 1.0 / ratio ** 2) ** 0.5
-
-
-def extend_sweep(
-    a_max: float,
-    p_ratio: float,
-    ratio: float,
-    step_mm: float = TARGET_STEP_MM,
-    margin_mm: float = EDGE_MARGIN_MM,
-) -> tuple[float, float, int] | None:
-    """
-    Work out the extra samples needed to reach the geometric edge.
-
-    Returns (start, end, n) or None when the sweep already reaches the edge.
-    The new interval begins one step after the last sampled point and ends as
-    close to the limit as a step of at most `step_mm` allows.
-    """
-    limit = max_major_axis(p_ratio, ratio) - margin_mm
-    if not (limit == limit) or a_max >= limit:      # NaN or already long enough
-        return None
-
-    start = a_max + step_mm
-    if start > limit:
-        return None                                  # gap already below one step
-
-    n_new = int((limit - a_max) / step_mm)           # whole steps only
-    if n_new < 1:
-        return None
-
-    end = a_max + n_new * step_mm
-    # the final point should land at the limit rather than short of it, as long
-    # as doing so does not exceed the step
-    if limit - end <= step_mm:
-        end = limit
-    return start, end, n_new
-
-
-# --------------------------------------------------------------------------- #
-# Parsing
-# --------------------------------------------------------------------------- #
-
-@dataclass
-class Leaf:
-    """One row of the tree: a fully resolved geometry plus its `a` coverage."""
-
-    levels: tuple[float, ...]   # one value per entry of LEVELS
-    n_samples: int
-    a_min: float
-    a_max: float
-    source: str
-
-    @property
-    def a_span(self) -> float:
-        return self.a_max - self.a_min
-
-    # ---- geometry -----------------------------------------------------
-    @property
-    def p_ratio(self) -> float:
-        return self.levels[LEVELS.index("P_ratio")]
-
-    @property
-    def ratio(self) -> float:
-        return self.levels[LEVELS.index("ratio")]
-
-    @property
-    def a_limit(self) -> float:
-        """Largest usable semi-major axis for this cell and elongation."""
-        return max_major_axis(self.p_ratio, self.ratio)
-
-    @property
-    def extension(self) -> tuple[float, float, int] | None:
-        """Extra sweep needed to reach the edge, or None if already there."""
-        return extend_sweep(self.a_max, self.p_ratio, self.ratio)
-
-    @property
-    def needs_extension(self) -> bool:
-        return self.extension is not None
-
-    @property
-    def a_coverage(self) -> float:
-        """Fraction of the usable interval that was actually sampled."""
-        limit = self.a_limit - EDGE_MARGIN_MM
-        if not (limit == limit) or limit <= 0:
-            return float("nan")
-        return self.a_max / limit
-
-
-def _split_strip(line: str) -> list[str]:
-    """TAB-split, then strip quotes and whitespace from each field."""
-    return [part.strip().strip('"').strip() for part in line.split("\t")]
-
-
-def _to_float(text: str) -> float | None:
-    try:
-        return float(text)
-    except ValueError:
-        return None
-
-
-def read_navigator(path: Path) -> list[dict[str, float]]:
-    """
-    Read one navigator CSV into a list of parameter dicts.
-
-    CST writes TAB-separated fields, each wrapped in double quotes, with a
-    leading space inside the quotes on the header. Column names vary between
-    export scripts, so lookup is by name rather than position.
-    """
-    try:
-        text = path.read_text(encoding="utf-8-sig", errors="replace")
-    except OSError as exc:
-        print(f"  cannot read {path}: {exc}")
-        return []
-
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    if len(lines) < 2:
-        return []
-
-    header = _split_strip(lines[0])
-    rows: list[dict[str, float]] = []
-
-    for line in lines[1:]:
-        fields = _split_strip(line)
-        if len(fields) < len(header):
-            fields += [""] * (len(header) - len(fields))
-
-        record: dict[str, float] = {}
-        for name, field in zip(header, fields):
-            value = _to_float(field)
-            if value is not None:
-                record[name] = value
-        if record:
-            rows.append(record)
-
-    return rows
-
-
-def collect_leaves(root: Path, verbose: bool = False) -> tuple[list[Leaf], list[str]]:
-    """
-    Walk the tree and collapse each navigator CSV into per-group `a` coverage.
-
-    Every file visited is named when `verbose` is set, together with its header
-    and whether it was usable, which is the quickest way to find a dataset with
-    unexpected column names.
-
-    Returns the leaves and a list of warnings for files that could not be used.
-    """
-    groups: dict[tuple[float, ...], dict] = {}
-    warnings: list[str] = []
-
-    nav_files = sorted(root.rglob(NAVIGATOR_NAME))
-    if not nav_files:
-        return [], [f"no {NAVIGATOR_NAME} found under {root}"]
-
-    required = LEVELS + [TUNING]
-
-    for nav in nav_files:
-        rel = nav.parent.relative_to(root)
-        rows = read_navigator(nav)
-        if not rows:
-            warnings.append(f"{nav}: no usable rows")
-            continue
-
-        if verbose:
-            print(f"  {rel}: {len(rows)} rows, header {list(rows[0])}")
-
-        # Column names vary between CST export scripts, so resolve each
-        # required column to the header spelling actually present.
-        # Matching is case-insensitive and tolerant of surrounding space.
-        available = {name.strip().lower(): name for name in rows[0]}
-        resolved: dict[str, str] = {}
-        for want in required:
-            hit = available.get(want.strip().lower())
-            if hit is None:
-                resolved = {}
-                break
-            resolved[want] = hit
-
-        if not resolved:
-            missing_cols = [w for w in required if w.lower() not in available]
-            warnings.append(
-                f"{nav}: missing columns {missing_cols}, skipped"
-                f"  (header was {list(rows[0])})"
-            )
-            if verbose:
-                print(f"      MISSING {missing_cols}")
-            continue
-
-        # Per-row check: a column being present in row 0 does not guarantee it
-        # is present in every row, because blank fields are dropped when the
-        # record is built.
-        skipped_rows = 0
-        for row in rows:
-            if any(resolved[lvl] not in row for lvl in required):
-                skipped_rows += 1
-                continue
-
-            key = tuple(
-                round(row[resolved[lvl]] / VALUE_TOL) * VALUE_TOL
-                for lvl in LEVELS
-            )
-            entry = groups.setdefault(key, {
-                "a_values": [],
-                "source": str(nav.parent.relative_to(root)),
-            })
-            entry["a_values"].append(row[resolved[TUNING]])
-
-        if skipped_rows:
-            warnings.append(
-                f"{nav}: {skipped_rows} of {len(rows)} rows lacked a required "
-                f"value, skipped"
-            )
-
-    leaves: list[Leaf] = []
-    for key, entry in groups.items():
-        a_values = entry["a_values"]
-        leaves.append(Leaf(
-            levels=key,
-            n_samples=len(a_values),
-            a_min=min(a_values),
-            a_max=max(a_values),
-            source=entry["source"],
-        ))
-
-    leaves.sort(key=lambda lf: lf.levels)
-    return leaves, warnings
+max_major_axis = common.max_major_axis
+extend_sweep = common.extend_sweep
+Leaf = common.Leaf
+read_navigator = common.read_navigator
+collect_leaves = common.collect_leaves
+_fmt = common.fmt
 
 
 # --------------------------------------------------------------------------- #
 # Console rendering
 # --------------------------------------------------------------------------- #
-
-def _fmt(value: float) -> str:
-    """Compact number formatting: integers lose the decimal point."""
-    if abs(value - round(value)) < 1e-9:
-        return f"{int(round(value))}"
-    return f"{value:g}"
-
 
 def render_tree(leaves: list[Leaf], top: int | None) -> str:
     """
@@ -853,11 +590,19 @@ def write_csv(leaves: list[Leaf], out_csv: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("directory", type=Path, help="root to scan recursively")
+    parser.add_argument("directory", type=Path, nargs="?", default=None,
+                        help="root to scan recursively "
+                             f"(default: {config.DEFAULT_DATA_ROOT})")
+    parser.add_argument("--root", type=Path, default=None,
+                        help="data root; same as the positional argument, "
+                             "provided for consistency with coverage_stats.py")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="directory for coverage.csv and the image "
+                             "(default: the current directory)")
     parser.add_argument("--csv", type=Path, default=None,
-                        help="write the full table here")
+                        help="write the full table here (overrides --out)")
     parser.add_argument("--png", type=Path, default=None,
-                        help="write the overview image here")
+                        help="write the overview image here (overrides --out)")
     parser.add_argument("--no-png", action="store_true",
                         help="skip the image even if --png is not given")
     parser.add_argument("--top", type=int, default=0,
@@ -871,9 +616,16 @@ def main(argv: list[str] | None = None) -> int:
                         help="image format (default svg, vector and zoomable)")
     args = parser.parse_args(argv)
 
-    root: Path = args.directory
+    # The root can arrive positionally or via --root. Giving both is a mistake
+    # worth reporting rather than silently preferring one.
+    if args.root is not None and args.directory is not None:
+        print("error: give the data root either positionally or with --root, "
+              "not both")
+        return 1
+    root = common.resolve_root(args.root or args.directory)
+
     if not root.is_dir():
-        print(f"error: not a directory: {root}")
+        print(f"error: data root not found: {root}")
         return 1
 
     leaves, warnings = collect_leaves(root, verbose=args.verbose)
@@ -894,19 +646,26 @@ def main(argv: list[str] | None = None) -> int:
 
     # Outputs default to the directory the script was run from, not the data
     # directory, which is where the source data lives and should stay clean.
-    here = Path.cwd()
+    # --out redirects both, while --csv and --png override individually.
+    out_dir = (args.out if args.out is not None else Path.cwd())
+    if not out_dir.is_absolute():
+        out_dir = Path.cwd() / out_dir
 
-    if not args.csv:
-        args.csv = here / "coverage.csv"
-    args.csv.parent.mkdir(parents=True, exist_ok=True)
-    write_csv(leaves, args.csv)
-    print(f"\nwrote {args.csv.resolve()}  ({len(leaves)} rows)")
+    csv_path = args.csv if args.csv is not None else out_dir / "coverage.csv"
+    if not csv_path.is_absolute():
+        csv_path = Path.cwd() / csv_path
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    write_csv(leaves, csv_path)
+    print(f"\nwrote {csv_path.resolve()}  ({len(leaves)} rows)")
 
     if not args.no_png:
-        out_img = args.png or (here / f"data_statistics.{args.format}")
-        out_img.parent.mkdir(parents=True, exist_ok=True)
-        if render_image(leaves, render_summary(leaves), out_img):
-            print(f"wrote {out_img.resolve()}  (all {len(leaves)} rows)")
+        img_path = (args.png if args.png is not None
+                    else out_dir / f"data_statistics.{args.format}")
+        if not img_path.is_absolute():
+            img_path = Path.cwd() / img_path
+        img_path.parent.mkdir(parents=True, exist_ok=True)
+        if render_image(leaves, render_summary(leaves), img_path):
+            print(f"wrote {img_path.resolve()}  (all {len(leaves)} rows)")
         else:
             print("note: matplotlib not available, no image written")
 

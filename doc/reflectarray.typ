@@ -248,80 +248,22 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
 === Boundaries and ports
 - The Unit Cell template pre-configures these; verify them:
   - `Simulation -> Boundaries`: X and Y set to `unit cell`, Zmin set to `electric (Et = 0)`, Zmax set to `open (add space)`.
-  - `Simulation -> Waveguide Ports`: the Floquet port exists. Open its properties and ensure Mode 1 (TE00) and Mode 2 (TM00) are enabled.
-  - In the port's *Polarization* tab, set Mode 1 polarization angle to $0 degree$ and Mode 2 to $90 degree$, so `S1,1` is the x-pol reflection and `S2,2` the y-pol reflection.
-- #text(fill: orange)[*Caveat:*] because the pillar sits at $45 degree$, the structural eigenmodes are rotated relative to the global axes. Cross-terms `S1,2` and `S2,1` will therefore be non-zero. This is an expected consequence of the birefringence, not an error.
+  - `Simulation -> Ports`: the Floquet port exists by default. Open its properties and ensure Mode 1 (TE00) and Mode 2 (TM00) are enabled.
+- #INFO because the pillar sits at $45 degree$, the structural eigenmodes are rotated relative to the global axes. Cross-terms `S1,2` and `S2,1` will therefore be non-zero. This is an expected consequence of the birefringence, not an error.
 
-=== Solver
-- `Simulation -> Frequency Domain Solver`.
-- Accuracy `-40 dB` (coarse), frequency sampling set to *Fixed frequency list* at `30`, since single-frequency solves are much faster for sweeps.
-- Mesh: adaptive refinement on, max passes `2`.
-- Run and confirm `|S11|` is near 0 dB.
+=== Solvers
+- Frequency domain simulator was used.
+- Adaptive meshing was used, to secure it's accuracy while maintaining good perforamce a frequency bandwidth od 1 GHz at $f_0=30$~GHz was used.
 
-== Sweep 1: Phase range on one axis (Question A)
-- `Simulation -> Parameter Sweep`.
-- Sweep `a` from `0.3` to `2.0` mm in steps of `0.3` (about 6 samples); keep `ratio` fixed (e.g. `2.5`).
-- Result template: `S1,1` and `S2,2`, complex.
-- Enable *Combine all sequences in one run*, then Start.
-- Processing the results:
-  - In the *Navigation Tree*, expand `1D Results -> S-Parameters`, right-click `S1,1` and choose *Plot Properties*.
-  - Right-click the plot, choose *Export Data to File*, ASCII, *Export all curves in one file*, and save as `sweep_phase_x.txt`; repeat for `S2,2`.
-  - Alternatively create result templates `phi_x = phase(S1,1)` and `phi_y = phase(S2,2)` via `Post-Processing -> Result Templates -> New -> 1D Result from 1D Results`, then export those directly in degrees.
-- Build the assessment table:
-
-#align(center)[
-  #table(
-    columns: 4,
-    align: center,
-    [`a` (mm)], [$phi_x$ ($degree$)], [$phi_y$ ($degree$)], [$Delta phi = phi_y - phi_x$ ($degree$)],
-    [0.3], [..], [..], [..],
-    [0.6], [..], [..], [..],
-    [..], [..], [..], [..],
-  )
-]
-
-- Go/no-go metrics:
-  - $phi_x$ range, $max(phi_x) - min(phi_x)$, target $>= 300 degree$.
-  - $phi_y$ range, target $>= 390 degree$, i.e. $300 degree + 90 degree$.
-  - $Delta phi$ stability, target within $90 degree plus.minus 15 degree$ over most of the sweep.
-- #text(fill: orange)[*Note:*] CST returns phases in $(-180 degree, 180 degree]$. Always unwrap before computing ranges, otherwise a wrap past $plus.minus 180 degree$ will corrupt the result.
-
-== Sweep 2: Cross-axis offset (Question B)
-- `Simulation -> Parameter Sweep` with two parameters:
-  - `a` from `0.5` to `2.0` mm in steps of `0.3`.
-  - `ratio` from `1.5` to `4.0` in steps of `0.5`.
-- This is about 36 simulations. Use *Sequential* mode so all combinations are covered.
-- Because `b = a / ratio`, the constraint $a > b$ is preserved with no extra work.
-- Processing:
-  - Create 2-D scalar templates via `Post-Processing -> Result Templates -> New -> 2D Scalar Result from 1D Results`:
-    - `phase_range_x`: `max(phase(S1,1)) - min(phase(S1,1))`, parameters `a` and `ratio`.
-    - `phase_range_y`: `max(phase(S2,2)) - min(phase(S2,2))`.
-    - `phase_diff_mean`: `mean(phase(S2,2) - phase(S1,1))`.
-  - Plot each from `Results -> 2D Results -> ...` as a heatmap: bright regions where the phase range exceeds the targets, and a region near $90 degree$ for `phase_diff_mean`.
-  - The overlap of the feasible regions in the range map and the $90 degree$ map defines the usable $(a, ratio)$ design space.
-  - Right-click a 2-D plot, choose *Export -> Export to File* (ASCII matrix) for the design map.
-
-== Unwrap check (external script)
-- After exporting the raw phase curves, verify the numbers outside CST:
-
-```python
-import numpy as np
-data_x = np.loadtxt('sweep_phase_x.txt', skiprows=1)
-data_y = np.loadtxt('sweep_phase_y.txt', skiprows=1)
-phases_x = np.unwrap(data_x[:, 1:], axis=0)
-phases_y = np.unwrap(data_y[:, 1:], axis=0)
-for i in range(phases_x.shape[1]):
-    phi_x, phi_y = phases_x[:, i], phases_y[:, i]
-    delta = phi_y - phi_x
-    print(f"cfg {i}: phi_x range={np.ptp(phi_x):.1f}, "
-          f"phi_y range={np.ptp(phi_y):.1f}, "
-          f"delta mean={np.mean(delta):.1f} +/- {np.std(delta):.1f}")
-```
-
-== Interpretation and next steps
-- *If all three criteria pass:* the concept is feasible. Proceed to a finer sweep around the best $(a, ratio)$ region and then to the surrogate-model optimization described in the design-challenges note (Gaussian Process / polynomial response surface).
-- *If the phase range falls short:* the levers are a taller pillar, a higher $epsilon_r$ (up to 10), and a smaller-than-$lambda_0 / 2$ footprint, which improves range at the cost of grating-lobe margin (@Nayeri2018).
-- *If the $90 degree$ offset drifts:* the diagonal orientation alone may couple the axes. Consider adding a second geometric degree of freedom, as @Cheng2022 added independent heights, to decouple the per-axis phases.
+== Simulations Results
+- Initial simulations run with low sampling of `a` and with `ratio=1`.
+  - Simulations results were similar to those seen in @Beccaria2025.
+  - Structure behaved generally as expected - at higher permittivities ($>= 7$) structure exhibited multiple resonance at reasonable height, leading to the slope being too steep.
+  - Within a single resonance the highest achieved phase range with slope of $<= 400 degree/"mm"$  was around $320 degree$.
+  - Void structure didn't exhibit significantly better behavior in order to justify it.
+  - Later when `ratio` was introduced phase range of the cell decreased significantly.
+- Behavior of the UC was too complex to optimize by hand $->$ surrogate model based modeling and optimization on that model was used.
+- TODO
 
 
 
@@ -329,7 +271,8 @@ for i in range(phases_x.shape[1]):
 = Surrogate Model
 
 == Why a Surrogate Is Needed
-- The feasibility study establishes that the phase behaviour of the elliptical pillar cannot be predicted analytically. There is no closed-form solution for a truncated elliptical dielectric resonator on a grounded substrate, and the elliptic-cylinder harmonics that exist do not survive truncation in height plus the ground plane.
+- The feasibility study established that the phase behavior of the elliptical pillar cannot be predicted analytically.
+  - There is no closed-form solution for a truncated elliptical dielectric resonator on a grounded substrate
 - At the same time the design problem is not a single evaluation but a search. Each element of the final reflectarray needs a geometry that realises its own required phase, and the array contains hundreds of elements. On top of that the geometry has to be chosen such that the $90 degree$ inter-axis offset is preserved across the whole phase range.
 - Evaluating that by full-wave simulation is not viable: a single CST solve costs minutes, the design space spans five parameters, and the search would have to be repeated for every element of every candidate array.
 - A surrogate model replaces the full-wave solve with a cheap regression that maps geometry to response, so that the search runs on the model and only the final candidates are verified in CST. This is the standard role of surrogate modelling in simulation-driven design @Forrester2008.
@@ -385,7 +328,7 @@ for i in range(phases_x.shape[1]):
 - *Why not a sequence model.* Predicting the whole phase curve over $a$ at once, for instance with a recurrent network, was considered and rejected. There is no causality along $a$, so the ordering assumption is not physically motivated; an autoregressive error would compound at the resonance where the phase slope is steepest; and the design search requires point queries, which a sequence model can only answer by generating a full curve. The curve structure is already exploited implicitly, since neighbouring values of $a$ give neighbouring feature vectors and therefore similar predictions.
 - Every candidate the surrogate proposes is verified by a full CST simulation before it is accepted. The surrogate therefore only needs to rank candidates correctly, not to be accurate in absolute terms.
 
-== Uncertainty Quantification
+=== Uncertainty Quantification
 - Two different uncertainties are needed, and they are not interchangeable.
   - *Generalisation error* answers how accurate the model is overall. It is estimated by $k$-fold cross-validation: the data are split into $k = 5$ folds, the model is trained $k$ times with one fold held out each time, and the spread of the held-out error across folds gives the variance of the performance estimate.
   - *Per-prediction uncertainty* answers how far a single prediction can be trusted. Cross-validation cannot supply this, because it says nothing about any individual input.
@@ -398,7 +341,7 @@ for i in range(phases_x.shape[1]):
   rather than by linear propagation of the per-component variances.
 - The intervals are validated by a *calibration* check: predictions are binned by predicted $sigma$, and for each bin the fraction of true values falling within $plus.minus 1.96 sigma$ is compared with the nominal $95 thin %$. Systematic under-coverage would indicate overconfident intervals and require recalibration before the uncertainty is used to guide sampling.
 
-== Physics-Informed Neural Networks
+=== Physics-Informed Neural Networks
 - A physics-informed neural network (PINN) embeds the residual of a governing differential equation in the training loss @Raissi2019:
   $ cal(L) = cal(L)_"data" + lambda cal(L)_"PDE" $
   where $cal(L)_"PDE"$ penalises violation of the PDE at collocation points, evaluated by differentiating the network output with respect to its spatial or temporal coordinates.
@@ -407,6 +350,16 @@ for i in range(phases_x.shape[1]):
 - Two further properties of PINNs work against their use here. They are formulated for a single instance of a PDE, that is one set of boundary conditions and material parameters, whereas the requirement is a map over a five-dimensional parameter space. And their training is expensive and sensitive to architecture, sampling and optimisation settings, which would be paid for no benefit.
 - *What is adopted instead* is the approach used in electromagnetic surrogate modelling, where physical consistency comes from the prediction basis rather than from a PDE term. Physics-constrained networks for antenna work predict spherical wave expansion coefficients and scattering parameters with an ordinary network @Jensen2026, and for lossless periodic structures the constraint is imposed by projecting the output onto a manifold that enforces energy conservation @Prehn2026. The analogue here is the pair of measures already described: predicting complex reflection coefficients instead of wrapped phase, and penalising $|R| > 1$ in the loss.
 - A neural operator, which does map between function spaces and generalises across parameters where a PINN does not, would become relevant only if the model were extended from a single frequency to a full frequency sweep. It is not used at present.
+
+== Dataset
+- Simulations were mostly run for `P_ratio=0.4` with permittivities `epsilon_r=4.5` and `epsilon_r=7.5` (which are nominal values of the Zetamix material, though in reality the material will need to be measured and more simulations run)
+  - Some simulations were also run for `epsilon_r=7` and then with larger unit cell size of $0.5lambda_0$, again with `epsilon_r=4.5` and `epsilon_r`
+  - Combined some 19596 configurations were computed
+- Low values of `a` aren't really able to achieve phase difference and thus are useless.
+  - With single resonance is nowhere near possible to achieve the needed $360 degree$ of phase delay with the unit cell.
+  - Printer resolution is limiting especially at small features, since they won't really be needed the limits of FDM are less severe.
+- TODO
+
 
 #pagebreak()
 

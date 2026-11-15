@@ -52,9 +52,13 @@ LAMBDA0_MM = C0_MM_GHZ / F0_GHZ
 # --------------------------------------------------------------------------- #
 
 # Minimum gap between the rotated ellipse's bounding box and the cell edge, mm.
-# The base clearance is a print-resolution constraint, so it stays absolute
-# and does NOT scale with the cell.
-CLEARANCE_MM = 0.2
+# This clearance should be way smaller then actually clearance used in the design
+# The model should achieve good performance on the edges of the interval, even though
+# they won't really be used in the final model
+#
+# as CST is modeling elipse with a polygon setting to zero, could introducer some samples
+# where the geometry actually overflowed the base size
+CLEARANCE_MM = 0.01
 
 # Ellipse major axis is rotated by this angle relative to the array axes.
 ELLIPSE_ROTATION_DEG = 45.0
