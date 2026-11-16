@@ -140,6 +140,12 @@ def load_sweep_dir(
             log["missing_metadata"] += 1
             continue
 
+        # Blacklist check first: it is cheap and avoids parsing a file that
+        # will be discarded anyway.
+        if metadata.matches_blacklist(record.params, config.BLACKLIST):
+            log["blacklisted"] += 1
+            continue
+
         try:
             ts = touchstone.parse_touchstone(path)
         except ValueError as exc:
@@ -388,6 +394,12 @@ def main(argv: list[str] | None = None) -> int:
 
     dirs = find_sweep_dirs(root)
     print(f"found {len(dirs)} sweep directories under {root}")
+
+    if config.BLACKLIST:
+        print(f"blacklist active ({len(config.BLACKLIST)} entries):")
+        for entry in config.BLACKLIST:
+            print(f"  exclude {metadata.describe_blacklist_entry(entry)}")
+
     for d in dirs:
         before = len(all_samples)
         all_samples.extend(load_sweep_dir(d, config.F0_GHZ, with_band, log))

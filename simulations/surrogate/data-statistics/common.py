@@ -68,6 +68,87 @@ def read_navigator(path: Path) -> list[dict[str, float]]:
 
 
 # --------------------------------------------------------------------------- #
+# Blacklist matching
+# --------------------------------------------------------------------------- #
+
+# The wildcard token: a parameter mapped to this matches any value.
+WILDCARD = "*"
+
+# Float comparison tolerance. Values come straight from the CST sweep table, so
+# exact equality would usually suffice; the tolerance only guards against a
+# value being written with a different number of decimals in different exports.
+BLACKLIST_TOL = 1e-6
+
+
+def matches_blacklist(
+    params: dict[str, float],
+    blacklist: list[dict[str, float | str]],
+) -> bool:
+    """
+    True when `params` satisfies any complete entry of `blacklist`.
+
+    Each entry is a dict of raw parameter name to required value. A parameter
+    absent from an entry, or mapped to `WILDCARD`, matches anything. All
+    conditions within one entry must hold for that entry to match, and a match
+    on any entry excludes the sample.
+
+    Parameter names are compared case-insensitively and with surrounding
+    whitespace ignored, matching the way the CSV reader resolves columns.
+
+    This mirrors `metadata.matches_blacklist` in the data-processor directory.
+    The logic is duplicated deliberately so the two tools stay independent; the
+    blacklists themselves must be kept in step by hand.
+
+    Parameters
+    ----------
+    params    : raw parameter values for one configuration, e.g. one row from
+                `read_navigator`
+    blacklist : list of condition dicts, from config.BLACKLIST
+    """
+    if not blacklist:
+        return False
+
+    # Normalise the row keys once, so lookup does not depend on the export's
+    # capitalisation.
+    normalised = {k.strip().lower(): v for k, v in params.items()}
+
+    for entry in blacklist:
+        matched = True
+        for key, want in entry.items():
+            if want == WILDCARD:
+                continue
+
+            have = normalised.get(key.strip().lower())
+            if have is None:
+                matched = False
+                break
+
+            try:
+                want_f = float(want)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"blacklist entry {entry!r}: value for {key!r} is neither "
+                    f"a number nor {WILDCARD!r}"
+                )
+
+            if abs(float(have) - want_f) > BLACKLIST_TOL:
+                matched = False
+                break
+
+        if matched:
+            return True
+
+    return False
+
+
+def describe_blacklist_entry(entry: dict[str, float | str]) -> str:
+    """Human-readable form of one blacklist entry, for logging."""
+    if not entry:
+        return "(empty entry: matches everything)"
+    return ", ".join(f"{k}={v}" for k, v in entry.items())
+
+
+# --------------------------------------------------------------------------- #
 # Geometry
 # --------------------------------------------------------------------------- #
 
@@ -264,10 +345,19 @@ def collect_samples(root: Path, verbose: bool = False) -> tuple[list[Sample], li
             continue
 
         skipped = 0
+        blacklisted = 0
         for row in rows:
             if any(resolved[k] not in row for k in required):
                 skipped += 1
                 continue
+
+            # Blacklist check on the raw CSV values, before the sample is built.
+            # Uses the row's own keys, so the case-insensitive column
+            # resolution above does not affect the lookup.
+            if matches_blacklist(row, config.BLACKLIST):
+                blacklisted += 1
+                continue
+
             samples.append(Sample(
                 p_ratio=row[resolved["P_ratio"]],
                 epsilon_r=row[resolved["epsilon_r"]],
@@ -276,6 +366,11 @@ def collect_samples(root: Path, verbose: bool = False) -> tuple[list[Sample], li
                 a=row[resolved["a"]],
                 source=str(rel),
             ))
+
+        if blacklisted:
+            warnings.append(
+                f"{rel}: {blacklisted} row(s) excluded by the blacklist"
+            )
 
         if skipped:
             warnings.append(

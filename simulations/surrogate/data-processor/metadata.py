@@ -35,6 +35,78 @@ class RunRecord:
         return self.params.get(key, default)
 
 
+# --------------------------------------------------------------------------- #
+# Blacklist matching
+# --------------------------------------------------------------------------- #
+
+# Float comparison tolerance for blacklist matching. The values come straight
+# from the CST sweep table rather than from arithmetic, so exact equality would
+# usually suffice; the tolerance only guards against a value being written with
+# a different number of decimals in different exports.
+_BLACKLIST_TOL = 1e-6
+
+# The wildcard token: a parameter mapped to this matches any value.
+WILDCARD = "*"
+
+
+def matches_blacklist(
+    params: dict[str, float],
+    blacklist: list[dict[str, float | str]],
+) -> bool:
+    """
+    True when `params` satisfies any complete entry of `blacklist`.
+
+    Each entry is a dict of raw parameter name to required value. A parameter
+    that is absent from an entry, or mapped to `WILDCARD`, matches anything.
+    All conditions within one entry must hold for that entry to match, and a
+    match on any entry excludes the sample.
+
+    Parameters
+    ----------
+    params    : raw parameter values for one configuration, e.g. the contents
+                of a RunRecord.params
+    blacklist : list of condition dicts, from config.BLACKLIST
+    """
+    if not blacklist:
+        return False
+
+    for entry in blacklist:
+        matched = True
+        for key, want in entry.items():
+            if want == WILDCARD:
+                continue
+
+            have = params.get(key)
+            if have is None:
+                matched = False
+                break
+
+            try:
+                want_f = float(want)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"blacklist entry {entry!r}: value for {key!r} is neither "
+                    f"a number nor {WILDCARD!r}"
+                )
+
+            if abs(float(have) - want_f) > _BLACKLIST_TOL:
+                matched = False
+                break
+
+        if matched:
+            return True
+
+    return False
+
+
+def describe_blacklist_entry(entry: dict[str, float | str]) -> str:
+    """Human-readable form of one blacklist entry, for logging."""
+    if not entry:
+        return "(empty entry: matches everything)"
+    parts = [f"{k}={v}" for k, v in entry.items()]
+    return ", ".join(parts)
+
+
 def _split_strip(line: str) -> list[str]:
     """Split a TAB-separated line into trimmed, quote-stripped fields."""
     return [part.strip().strip('"').strip() for part in line.split("\t")]

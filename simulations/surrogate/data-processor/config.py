@@ -81,8 +81,6 @@ CIRCULAR_TOL = 1e-3
 
 
 # --------------------------------------------------------------------------- #
-# Feature transforms
-# --------------------------------------------------------------------------- #
 # Feature selection
 # --------------------------------------------------------------------------- #
 #
@@ -117,6 +115,35 @@ BAND_FEATURE_TRANSFORMS = [
     ("dphi_df",             "feat_dphi_df"),
     ("band_spread",         "feat_band_spread"),
     ("resonance_in_band",   "feat_resonance_in_band"),
+]
+
+
+# --------------------------------------------------------------------------- #
+# Sample blacklist
+# --------------------------------------------------------------------------- #
+#
+# Exclude groups of sweep configurations from the dataset entirely, before any
+# loading or validation work is done.
+#
+# Each entry is a dict mapping a raw parameter name to a value:
+#
+#     {"P_ratio": 0.5, "epsilon_r": 7.5}   # that exact combination only
+#     {"P_ratio": 0.5, "epsilon_r": "*"}   # any permittivity at P_ratio = 0.5
+#
+# A parameter that is absent from a dict, or mapped to "*", matches anything.
+# All entries in a dict must match for the sample to be excluded, so a sample
+# is dropped when it satisfies at least one dict completely.
+#
+# Recognised keys are the raw CSV parameter names: "a", "ratio", "P_ratio",
+# "epsilon_r", "H_pillar", "H_base". Matching is by exact float equality, which
+# is safe because these values come straight from the CST sweep table rather
+# than from arithmetic. The same rules are applied by data-statistics so the
+# two tools always see the same population.
+
+BLACKLIST: list[dict[str, float | str]] = [
+    # Examples, left inactive by default:
+    {"P_ratio": 0.5, "epsilon_r": 7.5},
+    # {"P_ratio": 0.5, "epsilon_r": "*"},
 ]
 
 

@@ -32,6 +32,36 @@ VALUE_TOL = 1e-6
 
 
 # --------------------------------------------------------------------------- #
+# Sample blacklist
+# --------------------------------------------------------------------------- #
+#
+# Exclude groups of sweep configurations from every statistic, so the reported
+# population matches the one the data-processor builds.
+#
+# Each entry is a dict mapping a raw CSV parameter name to a value:
+#
+#     {"P_ratio": 0.5, "epsilon_r": 7.5}   # that exact combination only
+#     {"P_ratio": 0.5, "epsilon_r": "*"}   # any permittivity at P_ratio = 0.5
+#
+# A parameter that is absent from a dict, or mapped to "*", matches anything.
+# All keys in a dict must match for the sample to be excluded, so a sample is
+# dropped when it satisfies at least one dict completely.
+#
+# Recognised keys are the raw CSV parameter names: "a", "ratio", "P_ratio",
+# "epsilon_r", "H_pillar", "H_base".
+#
+# NOTE: this list is duplicated in data-processor/config.py. The two must be
+# kept in step by hand so that the statistics and the training set describe the
+# same population.
+
+BLACKLIST: list[dict[str, float | str]] = [
+    # Examples, left inactive by default:
+    {"P_ratio": 0.5, "epsilon_r": 7.5},
+    # {"P_ratio": 0.5, "epsilon_r": "*"},
+]
+
+
+# --------------------------------------------------------------------------- #
 # Geometry
 # --------------------------------------------------------------------------- #
 #
