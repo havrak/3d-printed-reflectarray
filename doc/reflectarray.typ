@@ -626,6 +626,72 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
   - It does mean the dataset is not as good as it should be, and the uncertainty estimates should be read with that in mind.
   - Automating the sweep so that it can be driven by the surrogate's own uncertainty is the natural next step, and is what the Sobol sampling discussed above is intended for.
 
+== Training
+=== Dataset Splitting
+- *The unit of splitting is the geometry, not the sample.*
+  - Each row of the dataset is one value of the tuning variable `a`, belonging to one geometry. A geometry is the sweep along `a` at a fixed tuple $(P_"ratio", epsilon_r, H_"pillar", "ratio")$.
+  - The dataset therefore has of order $10^4$ rows but only a few hundred geometries: the rows are strongly correlated within each sweep.
+  - A sample-level split would place different `a` values of the same geometry on both sides of the split. The model would then be evaluated on a curve it had already seen during training, differing only along one axis, and the resulting score would measure interpolation *inside a known configuration* rather than the ability to predict an unseen one.
+  - Since the surrogate exists to propose geometries that were never simulated, that would test the wrong thing. All `a` values of a geometry therefore go to the same side, and the group key is the full fixed-parameter tuple.
+  - This is the mechanism that prevents leakage. Stratification, discussed next, does not.
+- *Grouping and stratification do different jobs.*
+  - Grouping removes the correlation-induced optimism in the error estimate. It is what makes the number meaningful at all.
+  - Stratification only controls *how groups are distributed* across folds, so that each fold is compositionally similar to the others and the fold-to-fold spread reflects the model rather than the accident of the split. It reduces the variance of the estimate, not its bias.
+- *The strata are written by hand rather than derived from the parameter values.*
+  - The natural stratification is on the $(P_"ratio", epsilon_r)$ cell, since these are fabrication choices rather than continuous design variables and they carry the least coverage by design.
+  - However, two of the cells carry only about a dozen geometries each. Splitting them individually would leave roughly two geometries per validation fold, and the per-fold error would be dominated by which particular geometries happened to be held out rather than by the model.
+  - Adjacent permittivities are therefore pooled into one stratum, which restores a workable group count. The current partition is
+
+  #align(center)[
+    #table(
+      columns: 3,
+      align: (center, center, left),
+      stroke: none,
+      inset: (x: 6pt, y: 4pt),
+      [*Stratum*], [*Composition*], [*Note*],
+      [`P0.4_er4.5`], [`P_ratio` 0.4, $epsilon_r$ 4.5], [largest cell, swept across all ratios],
+      [`P0.4_er5-6`], [`P_ratio` 0.4, $epsilon_r$ 5 and 6], [pooled: too few geometries separately],
+      [`P0.4_er7`], [`P_ratio` 0.4, $epsilon_r$ 7], [interpolates between 4.5 and 7.5],
+      [`P0.4_er7.5`], [`P_ratio` 0.4, $epsilon_r$ 7.5], [largest cell, swept across all ratios],
+      [`P0.5_er4.5`], [`P_ratio` 0.5, $epsilon_r$ 4.5], [larger cell; may be dropped, see above],
+    )
+  ]
+
+  - The trade is explicit: a pooled stratum is balanced in total size but not necessarily in composition, so a fold may receive more $epsilon_r = 5$ than $6$. With a dozen geometries, balance matters more than per-cell exactness.
+  - Grouping still uses the exact tuple, so pooling the strata introduces no leakage. Only the granularity of the fold assignment changes.
+  - A sample that matches no stratum is reported and placed in a fallback stratum rather than silently absorbed, so a dataset containing an unexpected cell surfaces as a warning instead of a quiet misallocation.
+- *Height is deliberately not stratified.*
+  - Stratifying on `H_pillar` as well would be degenerate: there are many height values against only a few hundred geometries, which leaves too few groups per stratum to populate every fold.
+  - The consequence is that every fold contains the heights the model is tested on, so the cross-validation estimate is a *best case with respect to height extrapolation*.
+  - This is acceptable because the surrogate is queried at heights inside the simulated range, but it should be stated when the CV error is reported.
+- *The holdout is touched once.*
+  - The data are divided into a training portion and a holdout, and the holdout is used only for the final evaluation after cross-validation and after the deep ensemble is trained.
+  - Looking at it more than once turns it into a validation set, at which point its score stops being an estimate of generalisation error.
+  - The split is therefore generated once, written to disk alongside the dataset, and treated as fixed thereafter. Both the holdout and the fold assignments record the seed, the grouping key and the strata used, so the partition is reproducible and auditable rather than an implicit consequence of the code.
+- *The resonance filter is a modelling choice, not a data-quality one.*
+  - The dataset carries a flag for whether the major-axis reflection has a notch inside the simulated band.
+  - Such samples remain valid design points, but the phase slope is not a smooth function of geometry near a notch, so they are poor regression targets for the slope.
+  - The filter is applied at split time rather than during dataset construction, so the full dataset stays intact on disk and the choice remains reversible.
+  - This is distinct from the case of a resonance that sits inside the swept `a` range and is too coarsely sampled to resolve: such sweeps produce phase curves that are not merely noisy but *systematically wrong*, because the unwrapping locks onto the wrong branch. That is a data-quality failure rather than a modelling choice, and it was the reason one of the earlier cells was removed from the dataset rather than filtered.
+
+=== Normalisation
+- Inputs and targets are z-scored before training, so that the loss operates on quantities of comparable scale and the optimiser does not have to reconcile a feature measured in millimetres with one that is a dimensionless ratio.
+- *Z-scoring is a fit, not a fixed transformation.* It estimates a mean and a standard deviation from data, so it is subject to the same leakage argument as any other fitted step.
+  - Fitting on a set that includes validation rows encodes the location and spread of those rows in the coefficients. The model never sees their labels, but every prediction it makes is shifted by knowledge of where those inputs lie.
+  - The magnitude is small: a scaler is a two-parameter model fitted on hundreds of points, so the mean of a subset differs from the mean of the whole by roughly $sigma \/ sqrt(n)$.
+  - It is nonetheless the same failure mode as leaking a feature-selection step, so it is avoided rather than tolerated.
+- *Cross-validation and hyperparameter tuning.*
+  - The scaling coefficients are computed separately for every split, from that split's training rows only, and applied to its validation rows.
+  - They are therefore recomputed for every fold, since each fold has a different training set. The coefficients are not shared between folds.
+  - The consequence is that a given physical error maps to slightly different scaled errors in different folds, so the mean cross-validation loss is a mixture over slightly different scalings. This is accepted, because the alternative — one scaler fitted across folds — reintroduces the leakage.
+- *The deep ensemble and the final evaluation.*
+  - The ensemble is trained on the entire training portion, so its scaling coefficients are computed once from that whole portion and then applied unchanged to the holdout.
+  - The holdout was not part of the fit, so this is the same rule as for a fold: coefficients come from training data, never from evaluation data.
+  - Every member of the ensemble uses the same coefficients, so the ensemble spread reflects the networks rather than differences in preprocessing.
+- *Reported errors are converted back to physical units before comparison.*
+  - The targets are z-scored, so a loss value is in standardised units. Phase errors quoted in degrees must be obtained by inverting the scaling first.
+  - Since $Delta phi$ is a nonlinear function of all four predicted components, the ensemble spread is taken over $Delta phi$ computed per member in physical units, not in scaled space.
+
 
 #pagebreak()
 

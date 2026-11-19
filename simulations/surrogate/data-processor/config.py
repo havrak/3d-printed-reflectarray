@@ -142,8 +142,8 @@ BAND_FEATURE_TRANSFORMS = [
 
 BLACKLIST: list[dict[str, float | str]] = [
     # Examples, left inactive by default:
-    {"P_ratio": 0.5, "epsilon_r": 7.5},
-    # {"P_ratio": 0.5, "epsilon_r": "*"},
+    # {"P_ratio": 0.5, "epsilon_r": 7.5},
+    {"P_ratio": 0.5, "epsilon_r": "*"},
 ]
 
 

@@ -79,7 +79,7 @@ def band_column(dataset: dict[str, np.ndarray], name: str) -> np.ndarray:
     return dataset["band"][:, names.index(name)]
 
 
-def apply_filters(
+def apply_resonance_filter(
     dataset: dict[str, np.ndarray],
     filter_resonance: bool,
 ) -> np.ndarray:
@@ -130,11 +130,51 @@ def geometry_group_ids(dataset: dict[str, np.ndarray]) -> np.ndarray:
     return inverse.astype(np.int64)
 
 
-def stratum_ids(dataset: dict[str, np.ndarray], columns: list[str]) -> np.ndarray:
-    """One integer stratum id per row, from the given X_raw columns."""
-    keys = np.column_stack([raw_column(dataset, c) for c in columns])
-    _, inverse = np.unique(keys, axis=0, return_inverse=True)
-    return inverse.astype(np.int64)
+def stratum_ids(dataset: dict[str, np.ndarray]) -> np.ndarray:
+    """
+    One integer stratum id per row, from the hand-written strata in config.
+
+    A sample belongs to the first stratum whose every condition matches. Values
+    may be a scalar (exact match) or a tuple (membership). Samples matching no
+    stratum are reported and given the fallback id, so nothing is silently
+    dropped.
+
+    Strata are defined by hand rather than derived from the columns so the
+    granularity can be tuned to the data: the small permittivity cells carry
+    only a dozen geometries, and pooling adjacent ones restores a workable
+    number of groups per fold.
+    """
+    n = dataset["X"].shape[0]
+    ids = np.full(n, -1, dtype=np.int64)
+
+    for sid, spec in enumerate(config.STRATA):
+        mask = np.ones(n, dtype=bool)
+        for column in config.STRATA_COLUMNS:
+            if column not in spec:
+                continue
+            values = raw_column(dataset, column)
+            wanted = spec[column]
+            if isinstance(wanted, tuple):
+                mask &= np.isin(values, wanted)
+            else:
+                mask &= (values == wanted)
+
+        # First match wins; a sample already assigned is not reassigned.
+        mask &= (ids < 0)
+        ids[mask] = sid
+
+    unmatched = int(np.count_nonzero(ids < 0))
+    if unmatched:
+        print(f"  warning: {unmatched} samples match no stratum in config.STRATA; "
+              f"assigned to fallback stratum {len(config.STRATA)}")
+        ids[ids < 0] = len(config.STRATA)
+
+    return ids
+
+
+def stratum_names() -> list[str]:
+    """Human-readable stratum names, in id order, including the fallback."""
+    return [spec["name"] for spec in config.STRATA] + ["unmatched"]
 
 
 # --------------------------------------------------------------------------- #
@@ -273,26 +313,104 @@ def report_split(
     name: str,
     dataset: dict[str, np.ndarray],
     groups: np.ndarray,
+    strata: np.ndarray,
     train_idx: np.ndarray,
     val_idx: np.ndarray,
 ) -> None:
-    """Print group and sample counts, plus the per-cell composition."""
+    """Print group and sample counts, plus the per-stratum composition."""
     print(f"\n--- {name} ---")
     print(f"  samples : train {train_idx.size:6d}   val {val_idx.size:6d}")
     print(f"  groups  : train {np.unique(groups[train_idx]).size:6d}   "
           f"val {np.unique(groups[val_idx]).size:6d}")
 
-    p_ratio = raw_column(dataset, "p_ratio")
-    eps_r = raw_column(dataset, "eps_r")
-
-    print(f"  {'P_ratio':>8} {'eps_r':>7} | {'train':>7} {'val':>7} {'groups val':>11}")
-    cells = sorted({(float(a), float(b)) for a, b in zip(p_ratio, eps_r)})
-    for p, e in cells:
-        cell = (p_ratio == p) & (eps_r == e)
+    names = stratum_names()
+    print(f"  {'stratum':<16} {'train':>8} {'val':>8} {'groups val':>11}")
+    for sid in range(len(names)):
+        cell = (strata == sid)
         tr = int(np.count_nonzero(cell[train_idx]))
         va = int(np.count_nonzero(cell[val_idx]))
         gv = int(np.unique(groups[val_idx][cell[val_idx]]).size)
-        print(f"  {p:8.2f} {e:7.2f} | {tr:7d} {va:7d} {gv:11d}")
+        print(f"  {names[sid]:<16} {tr:8d} {va:8d} {gv:11d}")
+
+
+# --------------------------------------------------------------------------- #
+# Normalisation
+# --------------------------------------------------------------------------- #
+
+def fit_scaler(
+    X: np.ndarray,
+    train_idx: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Fit a z-score on the training rows only, returning (mean, std).
+
+    Fitting on the whole dataset would leak the validation set's location and
+    spread into the scaling coefficients. The model never sees the validation
+    labels, but every prediction it makes would be shifted by knowledge of
+    where those inputs lie.
+
+    The standard deviation is floored, so a feature that is constant within this
+    particular training split produces a zero column rather than a division by
+    zero. That is harmless: the network's bias weight covers a constant.
+    """
+    train = X[train_idx]
+    mean = train.mean(axis=0)
+    std = train.std(axis=0)
+    std = np.where(std < config.STD_FLOOR, 1.0, std)
+    return mean, std
+
+
+def apply_scaler(
+    X: np.ndarray,
+    mean: np.ndarray,
+    std: np.ndarray,
+) -> np.ndarray:
+    """Apply a fitted z-score. Used by the training code, not here."""
+    return (X - mean) / std
+
+
+def scaler_payload(
+    name: str,
+    X: np.ndarray,
+    Y: np.ndarray,
+    train_idx: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """
+    Fitted scaling coefficients for one split, ready to be stored.
+
+    Keys are prefixed with the split name so a single file can hold several
+    scalers, e.g. `holdout_x_mean`, `fold0_y_std`.
+    """
+    payload: dict[str, np.ndarray] = {}
+
+    if config.NORMALISE_INPUTS:
+        x_mean, x_std = fit_scaler(X, train_idx)
+        payload[f"{name}_x_mean"] = x_mean
+        payload[f"{name}_x_std"] = x_std
+
+    if config.NORMALISE_TARGETS:
+        y_mean, y_std = fit_scaler(Y, train_idx)
+        payload[f"{name}_y_mean"] = y_mean
+        payload[f"{name}_y_std"] = y_std
+
+    return payload
+
+
+def report_scaler(
+    name: str,
+    feature_names: list[str],
+    target_names: list[str],
+    payload: dict[str, np.ndarray],
+) -> None:
+    """Print the fitted means and standard deviations for inspection."""
+    for kind, names in (("x", feature_names), ("y", target_names)):
+        mean = payload.get(f"{name}_{kind}_mean")
+        std = payload.get(f"{name}_{kind}_std")
+        if mean is None:
+            continue
+        print(f"  {kind} scaling ({name}):")
+        for n, m, s in zip(names, mean, std):
+            print(f"    {n:<22} mean {m:12.5g}   std {s:12.5g}")
 
 
 # --------------------------------------------------------------------------- #
@@ -332,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
     dataset = load_dataset(dataset_path)
     n_total = dataset["X"].shape[0]
 
-    keep = apply_filters(dataset, args.filter_resonance)
+    keep = apply_resonance_filter(dataset, args.filter_resonance)
 
     if args.filter_resonance:
         print(f"resonance filter: keeping {np.count_nonzero(keep)} "
@@ -349,25 +467,74 @@ def main(argv: list[str] | None = None) -> int:
            for k, v in dataset.items()}
 
     groups = geometry_group_ids(sub)
-    holdout_strata = stratum_ids(sub, config.HOLDOUT_STRATIFY_COLUMNS)
-    cv_strata = stratum_ids(sub, config.CV_STRATIFY_COLUMNS)
+    strata = stratum_ids(sub)
 
     print(f"geometries: {np.unique(groups).size}")
-    print(f"holdout strata ({config.HOLDOUT_STRATIFY_COLUMNS}): "
-          f"{np.unique(holdout_strata).size}")
-    print(f"cv strata ({config.CV_STRATIFY_COLUMNS}): "
-          f"{np.unique(cv_strata).size}")
+    print(f"strata ({config.STRATA_COLUMNS}): {np.unique(strata).size}")
 
     # ---- holdout ----
     train_idx, test_idx = make_holdout(
-        groups, holdout_strata, args.holdout, config.HOLDOUT_SEED,
+        groups, strata, args.holdout, config.HOLDOUT_SEED,
     )
-    report_split("holdout", sub, groups, train_idx, test_idx)
+    report_split("holdout", sub, groups, strata, train_idx, test_idx)
 
     # ---- cross-validation ----
-    folds = make_folds(groups, cv_strata, args.folds, config.CV_SEED)
+    # Folds are computed over the TRAINING portion only. Computing them over the
+    # full dataset would put holdout samples into some folds' training sets, so
+    # hyperparameters would be chosen with knowledge of the holdout and its
+    # score would stop being a generalisation estimate.
+    train_folds = make_folds(
+        groups[train_idx], strata[train_idx], args.folds, config.CV_SEED,
+    )
+    folds = [
+        (train_idx[tr], train_idx[va])
+        for tr, va in train_folds
+    ]
     for f, (tr, va) in enumerate(folds):
-        report_split(f"fold {f}", sub, groups, tr, va)
+        report_split(f"fold {f}", sub, groups, strata, tr, va)
+
+    # Guard: no fold may touch a holdout sample, or the holdout stops being an
+    # independent estimate and hyperparameters would be chosen against it.
+    test_set = set(test_idx.tolist())
+    for f, (tr, va) in enumerate(folds):
+        overlap = test_set.intersection(tr.tolist()) | test_set.intersection(va.tolist())
+        if overlap:
+            raise RuntimeError(
+                f"fold {f} overlaps the holdout by {len(overlap)} samples; "
+                f"folds must be built from the training portion only"
+            )
+
+    # ---- normalisation ----
+    # Two different rules, deliberately:
+    #
+    #   fold scalers     fitted on that fold's training rows only, so the
+    #                    validation rows never contribute to the coefficients.
+    #                    This is what keeps the CV estimate free of leakage.
+    #
+    #   ensemble scaler  fitted on ALL rows, training and holdout together, and
+    #                    then applied to both. The ensemble is the final model,
+    #                    and a single scaling computed over the whole dataset
+    #                    makes every prediction and every reported error
+    #                    comparable on one scale.
+    #
+    # NOTE: fitting the ensemble scaler on all rows means the holdout inputs
+    # contribute their mean and spread to the coefficients, so the final
+    # holdout score is mildly optimistic. See the README and the thesis for the
+    # reasoning and the magnitude (a two-parameter fit over hundreds of points).
+    X = sub["X"]
+    Y = sub["Y"]
+    feature_names = [str(n) for n in sub["feature_names"]]
+    target_names = [str(n) for n in sub["target_names"]]
+
+    all_idx = np.arange(X.shape[0], dtype=np.int64)
+    ensemble_scaler = scaler_payload("ensemble", X, Y, all_idx)
+    if ensemble_scaler:
+        print("\n--- normalisation ---")
+        report_scaler("ensemble", feature_names, target_names, ensemble_scaler)
+
+    fold_scalers: dict[str, np.ndarray] = {}
+    for f, (tr, _) in enumerate(folds):
+        fold_scalers.update(scaler_payload(f"fold{f}", X, Y, tr))
 
     if args.dry_run:
         print("\ndry run: nothing written")
@@ -388,8 +555,12 @@ def main(argv: list[str] | None = None) -> int:
         seed=np.int64(config.HOLDOUT_SEED),
         filter_resonance=np.array(args.filter_resonance),
         group_columns=np.array(config.GROUP_COLUMNS),
-        stratify_columns=np.array(config.HOLDOUT_STRATIFY_COLUMNS),
+        strata_columns=np.array(config.STRATA_COLUMNS),
+        strata_names=np.array(stratum_names()),
         dataset=np.array(str(dataset_path)),
+        feature_names=np.array(feature_names),
+        target_names=np.array(target_names),
+        **ensemble_scaler,
     )
     print(f"\nwrote {holdout_path}")
 
@@ -402,12 +573,16 @@ def main(argv: list[str] | None = None) -> int:
         "seed": np.int64(config.CV_SEED),
         "filter_resonance": np.array(args.filter_resonance),
         "group_columns": np.array(config.GROUP_COLUMNS),
-        "stratify_columns": np.array(config.CV_STRATIFY_COLUMNS),
+        "strata_columns": np.array(config.STRATA_COLUMNS),
+        "strata_names": np.array(stratum_names()),
         "dataset": np.array(str(dataset_path)),
+        "feature_names": np.array(feature_names),
+        "target_names": np.array(target_names),
     }
     for f, (tr, va) in enumerate(folds):
         payload[f"fold{f}_train_idx"] = tr
         payload[f"fold{f}_val_idx"] = va
+    payload.update(fold_scalers)
 
     np.savez_compressed(cv_path, **payload)
     print(f"wrote {cv_path}")
