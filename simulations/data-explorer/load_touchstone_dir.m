@@ -20,7 +20,7 @@ function cfg = load_touchstone_dir(dirpath, f0)
         idMap = read_run_csv(fullfile(dirpath, csvFiles(1).name));
         if ~isempty(fieldnames(idMap))
             useCSV = true;
-            fprintf('Using metadata CSV: %s\n', csvFiles(1).name);
+            fprintf('Using metadata CSV: %s\n', fullfile(dirpath, csvFiles(1).name));
         end
     end
     if ~useCSV
@@ -49,14 +49,18 @@ function cfg = load_touchstone_dir(dirpath, f0)
             Pr    = getfield_or_nan(m, 'P_ratio');
         end
 
-        % ---- read the S-parameters (always from the file) ----------------
+        % ---- read the S-parameters (always from the file) ---------------
         [f, S] = read_s2p(fpath);
 
         % ---- legacy header fallback if CSV gave nothing ------------------
         % Only touch the header when the CSV could not supply every field.
         % Reading every file's header costs one fopen per configuration and
         % is what exhausts the OS file-handle limit on large sweeps.
-        assert(all(~isnan([a Hp ratio er Pr])), 'Missing a values - dataset not fully annotated');
+        if all(isnan([a Hp ratio er Pr]))
+            continue; % touchstone file that isn't at all in the result_navigator -> ignore
+        else
+            assert(all(~isnan([a Hp ratio er Pr])), 'Missing a values - dataset not fully annotated');
+        end
         
         % if any(isnan([a Hp ratio er Pr]))
         %     disp("There is a problem, not all files are annotated reading headers");

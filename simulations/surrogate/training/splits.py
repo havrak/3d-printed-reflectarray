@@ -420,8 +420,9 @@ def report_scaler(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--dataset", type=Path, default=None,
-        help="path to dataset.npz; split files are written to the same directory",
+        "--dir", type=Path, default=None,
+        help="directory holding dataset.npz; split files are written to the "
+             "same directory. Default: config.DEFAULT_DATASET's directory",
     )
     parser.add_argument(
         "--holdout", type=float, default=config.HOLDOUT_FRACTION,
@@ -442,10 +443,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    dataset_path: Path = args.dataset or (
-        Path(__file__).resolve().parents[3] / config.DEFAULT_DATASET
-    )
-    dataset_path = dataset_path.resolve()
+    in_dir: Path = (args.dir.resolve() if args.dir
+                    else (Path(__file__).resolve().parents[3]
+                          / config.DEFAULT_DATASET).parent)
+    dataset_path = in_dir / "dataset.npz"
 
     dataset = load_dataset(dataset_path)
     n_total = dataset["X"].shape[0]
@@ -465,6 +466,13 @@ def main(argv: list[str] | None = None) -> int:
     # saved files refer to the filtered dataset consistently.
     sub = {k: (v[keep] if v.ndim >= 1 and v.shape[0] == n_total else v)
            for k, v in dataset.items()}
+
+    # The kept row indices are written to the split files. Without them a
+    # consumer cannot map the stored indices back onto the dataset, because the
+    # indices refer to the filtered subset while the dataset on disk is
+    # unfiltered. Storing the mask keeps the dataset intact and the mapping
+    # explicit.
+    keep_idx = np.flatnonzero(keep).astype(np.int64)
 
     groups = geometry_group_ids(sub)
     strata = stratum_ids(sub)
@@ -550,6 +558,8 @@ def main(argv: list[str] | None = None) -> int:
         test_idx=test_idx,
         group_ids=groups,
         n_samples=np.int64(groups.size),
+        n_dataset=np.int64(n_total),
+        keep_idx=keep_idx,
         n_groups=np.int64(np.unique(groups).size),
         holdout_fraction=np.float64(args.holdout),
         seed=np.int64(config.HOLDOUT_SEED),
@@ -568,6 +578,8 @@ def main(argv: list[str] | None = None) -> int:
     payload = {
         "group_ids": groups,
         "n_samples": np.int64(groups.size),
+        "n_dataset": np.int64(n_total),
+        "keep_idx": keep_idx,
         "n_groups": np.int64(np.unique(groups).size),
         "folds": np.int64(args.folds),
         "seed": np.int64(config.CV_SEED),

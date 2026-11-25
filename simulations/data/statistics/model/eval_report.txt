@@ -1,0 +1,82 @@
+ensemble evaluation
+dataset  : /home/havrak/prog/projects/diploma-thesis/simulations/data/dataset.npz
+members  : 10 (4x279 GELU)
+test     : 4017 samples (3800 after excluding ratio = 1)
+tol      : 5.0 deg
+
+column key
+  n         number of test samples in this group
+  phi MAE   mean |error| of phi_major, degrees
+  phi RMS   root mean square error of phi_major, degrees
+  dphi MAE  mean |error| of the inter-axis offset, degrees
+  dphi RMS  root mean square error of the inter-axis offset, degrees
+  mag       mean |error| of |R|, averaged over both axes (linear, 0..1)
+  s_phi     ensemble spread of phi_major, degrees. A CIRCULAR standard
+            deviation across the members at a fixed input, so it is branch
+            independent. This is the uncertainty of ONE member, not of the
+            ensemble mean
+  s_dphi    same, for the inter-axis offset
+  z         phi RMS error divided by s_phi/sqrt(M); 1 means calibrated
+  cov       fraction whose phi error falls inside the claimed 95% interval
+
+Why the spread is circular
+  phi_major and dphi are wrapped angles. A linear standard deviation is only
+  meaningful for angles sharing a branch: two members predicting +179 and -179
+  degrees differ by 2 degrees, but np.std reports 358. Because the phase sweeps
+  the full circle as `a` varies, some fraction of any group sits near the wrap
+  point, and those samples dominate an RMS aggregate -- five percent at 180
+  degrees among the rest at 2 degrees already gives about 40 degrees of apparent
+  spread.
+
+  The circular standard deviation, sqrt(-2 ln R) with R the mean resultant
+  length, is branch independent and reduces to the ordinary standard deviation
+  for small spreads.
+
+Why z and cov are computed this way
+  The error is that of the ENSEMBLE MEAN. The spread s_phi is that of a SINGLE
+  member at a fixed input. Averaging M roughly independent predictions reduces
+  the scatter about the truth by sqrt(M), so the mean should sit about
+  s_phi/sqrt(M) from the truth, not s_phi.
+
+  Both sides of z are second-moment quantities, RMS error against RMS spread, so
+  a calibrated ensemble gives z ~ 1 with no conversion constant. Comparing MAE
+  against a spread instead would require the factor sqrt(2/pi) ~ 0.8, which is a
+  property of the Gaussian, not of the ensemble.
+
+  cov is built per sample from the same s_phi/sqrt(M) interval. 95% is
+  calibrated; well below means the spread understates the error of the mean,
+  which happens where the members are strongly correlated.
+
+Why both MAE and RMS are reported
+  MAE is the intuitive typical error. RMS weights large errors quadratically,
+  which is what matters for a design decision: one badly mispredicted element
+  can send the search to the wrong geometry even when the typical element is
+  accurate.
+=== overall ===
+                              n     MAE    RMS     MAE    RMS      mag   s_phi s_dphi      z    cov
+                                    phi    phi    dphi   dphi                                      
+  all                      3800    0.55   1.78    0.49   1.92   0.0037    1.95   1.75   2.88    92%
+
+=== by stratum ===
+stratum                       n     MAE    RMS     MAE    RMS      mag   s_phi s_dphi      z    cov
+                                    phi    phi    dphi   dphi                                      
+  P0.4_er4.5               1700    0.35   0.58    0.22   0.33   0.0023    1.38   0.99   1.33    95%
+  P0.4_er5-6                484    0.57   1.24    0.49   1.20   0.0064    2.23   2.17   1.76    87%
+  P0.4_er7                  387    0.86   2.23    0.74   2.11   0.0046    2.97   2.75   2.37    88%
+  P0.4_er7.5               1229    0.70   2.67    0.80   3.04   0.0044    2.10   1.97   4.02    90%
+
+=== by tuning variable a ===
+a bin (mm)                    n     MAE    RMS     MAE    RMS      mag   s_phi s_dphi      z    cov
+                                    phi    phi    dphi   dphi                                      
+  0.400-0.582               192    0.21   0.27    0.14   0.19   0.0018    1.18   0.56   0.72    98%
+  0.582-0.764               200    0.16   0.21    0.09   0.12   0.0016    1.13   0.57   0.58    98%
+  0.764-0.946               300    0.18   0.23    0.10   0.13   0.0019    1.12   0.58   0.65    99%
+  0.946-1.128               372    0.24   0.29    0.12   0.16   0.0021    1.19   0.63   0.77   100%
+  1.128-1.310               384    0.31   0.39    0.16   0.25   0.0025    1.26   0.73   0.99    98%
+  1.310-1.492               400    0.35   0.46    0.25   0.38   0.0024    1.35   0.93   1.09    94%
+  1.492-1.674               387    0.39   0.57    0.33   0.46   0.0024    1.30   1.16   1.40    84%
+  1.674-1.856               375    0.40   0.58    0.42   0.65   0.0030    1.46   1.57   1.27    91%
+  1.856-2.038               373    0.56   0.92    0.60   1.18   0.0039    1.78   1.76   1.64    87%
+  2.038-2.220               340    1.25   4.31    1.44   4.91   0.0064    2.65   2.84   5.14    84%
+  2.220-2.402               338    1.33   3.31    1.18   3.30   0.0095    3.67   3.28   2.85    86%
+  2.402-2.584               139    1.55   2.92    1.38   2.95   0.0103    3.93   3.52   2.35    75%

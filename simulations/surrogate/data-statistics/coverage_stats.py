@@ -320,6 +320,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="name every navigator CSV visited")
     parser.add_argument("--no-plots", action="store_true",
                         help="print the count table only")
+    parser.add_argument("--table-out", type=Path, default=None,
+                        help="also write the count table to this file, so it "
+                             "can be included in a document verbatim")
     args = parser.parse_args(argv)
 
     # Command-line cosmetics override the config defaults for this run only
@@ -341,9 +344,17 @@ def main(argv: list[str] | None = None) -> int:
 
     agg = aggregate(samples)
 
+    table = count_table(agg, len(samples))
     print()
-    print(count_table(agg, len(samples)))
+    print(table)
     print()
+
+    if args.table_out is not None:
+        table_path = (args.table_out if args.table_out.is_absolute()
+                      else Path.cwd() / args.table_out)
+        table_path.parent.mkdir(parents=True, exist_ok=True)
+        table_path.write_text(table + "\n", encoding="utf-8")
+        print(f"wrote {table_path.resolve()}")
 
     if args.no_plots:
         return 0

@@ -56,13 +56,25 @@ def load_splits(path: Path) -> dict[str, np.ndarray]:
 
 
 def fold_indices(splits: dict[str, np.ndarray], folds: int):
-    """Yield (fold, train_idx, val_idx) from a split file."""
+    """
+    Yield (fold, train_idx, val_idx) from a split file.
+
+    Indices in the split file address the FILTERED subset used when the splits
+    were generated, so they are mapped back onto the dataset on disk via
+    `keep_idx`. Without this they would address the wrong rows whenever a
+    resonance filter was active.
+    """
+    keep_idx = splits["keep_idx"] if "keep_idx" in splits else None
+
     for f in range(folds):
-        yield (
-            f,
-            splits[f"fold{f}_train_idx"],
-            splits[f"fold{f}_val_idx"],
-        )
+        train_idx = splits[f"fold{f}_train_idx"]
+        val_idx = splits[f"fold{f}_val_idx"]
+
+        if keep_idx is not None:
+            train_idx = keep_idx[train_idx]
+            val_idx = keep_idx[val_idx]
+
+        yield f, train_idx, val_idx
 
 
 def scaled_fold(
@@ -527,13 +539,13 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument(
-        "--dataset", type=Path, required=True,
-        help="dataset.npz from the data processor; provides X, Y and names",
+        "--dir", type=Path, required=True,
+        help="directory holding dataset.npz and the CV split file",
     )
     parser.add_argument(
         "--folds-file", type=Path, default=None,
         help="split_cv_k{n}.npz from splits.py; provides fold indices and "
-             "scalers. Default: split_cv_k{folds}.npz beside the dataset",
+             "scalers. Default: split_cv_k{folds}.npz in --dir",
     )
     parser.add_argument("--folds", type=int, default=config.CV_FOLDS,
                         help="overridden by the fold count recorded in the split file")
@@ -546,11 +558,12 @@ def main(argv: list[str] | None = None) -> int:
 
     device = resolve_device(args.device)
 
-    dataset_path = args.dataset.resolve()
+    in_dir = args.dir.resolve()
+    dataset_path = in_dir / "dataset.npz"
     dataset = load_dataset(dataset_path)
 
     folds_path = args.folds_file or (
-        dataset_path.parent / config.CV_FILENAME_TEMPLATE.format(folds=args.folds)
+        in_dir / config.CV_FILENAME_TEMPLATE.format(folds=args.folds)
     )
     splits = load_splits(folds_path.resolve())
 

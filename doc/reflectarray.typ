@@ -504,12 +504,19 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
 - Most of the data were computed for `P_ratio = 0.4` at $epsilon_r = 4.5$ and $epsilon_r = 7.5$, the two nominal values bracketing the Zetamix material range.
   - These are nominal figures only; the printed permittivity has to be measured before any of it is trusted, and further simulations will follow that measurement, hopefully with proper sampling.
 - A smaller set extends the coverage to $epsilon_r = 7$ and to the larger cell size $P_ratio = 0.5$, again at $epsilon_r = 4.5$ and $epsilon_r = 7.5$.
-- In total 19 596 configurations were computed.
+- The exact counts per combination are not reproduced in the prose, since they change whenever the sweep is extended. `coverage_stats.py --table-out` writes the current figures to a file, included here verbatim:
+
+#align(center)[
+  #raw(
+    read("../simulations/data/statistics/dataset/counts.txt"),
+    block: true,
+    lang: "text",
+  )
+]
 
 === Structure of the data
-- The 19 596 configurations collapse into 342 distinct geometries, each swept along `a` at a fixed (P_ratio, epsilon_r, H_pillar, ratio).
+- The configurations collapse into a few hundred distinct geometries, each swept along `a` at a fixed (P_ratio, epsilon_r, H_pillar, ratio).
   - Per-geometry sample counts: minimum 29, median 52, maximum 94.
-- `a` spans 0.4 mm to 3.192 mm over the whole dataset.
 - Distinct values swept per parameter:
 
 #align(center)[
@@ -528,7 +535,7 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
 
   #align(center)[
   #figure(
-    image("../simulations/data/statistics/counts_summary.pdf", width: 46%),
+    image("../simulations/data/statistics/dataset/counts_summary.pdf", width: 46%),
     caption: [Valid samples per (P_ratio, epsilon_r) combination, after applying the 0.01 mm validity clearance. The two `P_ratio = 0.4` permittivities carry the bulk of the data; `P_ratio = 0.5` and `epsilon_r = 7` are represented by much smaller sets and act as coverage checks rather than training material.],
   )
 ]
@@ -546,29 +553,16 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
     $ a_max = P/2 dot sqrt(2)\/sqrt(1 + 1\/"ratio"^2) $
   - A larger `ratio` therefore permits a longer major axis, since the same elongation that lengthens the ellipse also shrinks its bounding box.
     - A sweep that shares one upper limit across several ratios consequently never reaches the geometric edge for the elongated configurations, or for some configurations computes unrealizable unit cells.
-- Applying a validity clearance of 0.01 mm removes 876 configurations, leaving *18 720 valid samples* (95.5 %).
+- Applying a validity clearance of 0.01 mm removes a few percent of the configurations; the surviving counts per combination are in the table above.
   - This clearance is purely a safeguard against CST approximation of elipse with some polygon, where I cannot be sure that the approximation didn't cross UC boundary, even with valid `a` and `b`.
   - It is deliberately much smaller than the 0.2 mm manufacturability clearance used when assessing printability, because a cell whose ellipse nearly touches the wall is still a valid design point and its response is worth having in the training set.
-- Every one of the 342 geometries reaches the geometric edge:
+- Every geometry reaches the geometric edge, and the largest usable `a` differs between combinations because it is set by the elongation rather than shared across the sweep. The figure below shows the resulting counts:
 
 
 #align(center)[
   #figure(
-    table(
-      columns: 6,
-      align: center,
-      stroke: none,
-      inset: (x: 6pt, y: 4pt),
-      table.header(
-        [*`P_ratio`*], [*`epsilon_r`*], [*valid `n`*], [*`a_min`* (mm)], [*`a_max`* (mm)], [*distinct `ratio`*],
-      ),
-      [0.4], [4.5], [9 250], [0.400], [2.584], [15],
-      [0.4], [7.0], [952],   [0.400], [2.209], [4],
-      [0.4], [7.5], [5 406], [0.400], [2.578], [15],
-      [0.5], [4.5], [2 802], [0.400], [3.138], [11],
-      [0.5], [7.5], [310],   [0.400], [2.478], [1],
-    ),
-    caption: [Valid sample counts and `a` coverage per (P_ratio, epsilon_r) combination. `a_max` differs between rows because it is set by the elongation: the longest ellipse that still fits the cell grows with `ratio`, and each combination contains a different mix of ratios.],
+    image("../simulations/data/statistics/dataset/counts_summary.pdf", width: 62%),
+    caption: [Valid sample counts and `a` coverage per (P_ratio, epsilon_r) combination, after applying the validity clearance. `a_max` differs between rows because it is set by the elongation: the longest ellipse that still fits the cell grows with `ratio`, and each combination contains a different mix of ratios.],
   )
 ]
 
@@ -577,22 +571,22 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
   - The histograms below pool all ratios within a (P_ratio, epsilon_r) combination, since the question is how densely the tuning axis is covered for a given cell and permittivity, independently of which elongation produced each point.
 - The two heavily sampled combinations, $epsilon_r = 4.5$ and $epsilon_r = 7.5$ at `P_ratio = 0.4`, cover the interval continuously from 0.4 mm to above 2.5 mm.
   - The histogram is not flat: the density falls towards large `a`, because the higher-ratio configurations reach the geometric limit earlier and contribute fewer points to the upper end.
-  - This is a property of the geometry rather than of the sampling plan, and it is the reason the `a_max` column differs between rows.
-- The $epsilon_r = 7$ set covers only 2.209 mm and just four ratios, so its upper `a` range is truncated relative to the other 0.4 cells. It is adequate to check whether the permittivity trend interpolates between 4.5 and 7.5, but not to train across the full interval on its own.
-- The `P_ratio = 0.5`, $epsilon_r = 7.5$ row is a single ratio at a single cell size. It is a spot check on the larger cell, not a coverage set, and its `a` histogram is correspondingly a single cluster rather than a distribution.
+  - This is a property of the geometry rather than of the sampling plan, and it is the reason the largest usable `a` differs between combinations.
+- The $epsilon_r = 7$ set is narrower and covers fewer ratios, so its upper `a` range is truncated relative to the other 0.4 cells. It is adequate to check whether the permittivity trend interpolates between 4.5 and 7.5, but not to train across the full interval on its own.
+- The `P_ratio = 0.5` cell is sampled at a single permittivity and a subset of ratios. It is a spot check on the larger cell rather than a coverage set.
 
 #grid(
   columns: (1fr, 1fr),
   gutter: 10pt,
-  figure(image("../simulations/data/statistics/a_hist_P0.4_er4.5.pdf", width: 100%), caption: [`a` coverage, `P_ratio` 0.4, $epsilon_r$ 4.5.]),
-  figure(image("../simulations/data/statistics/a_hist_P0.4_er7.5.pdf", width: 100%), caption: [`a` coverage, `P_ratio` 0.4, $epsilon_r$ 7.5.]),
+  figure(image("../simulations/data/statistics/dataset/a_hist_P0.4_er4.5.pdf", width: 100%), caption: [`a` coverage, `P_ratio` 0.4, $epsilon_r$ 4.5.]),
+  figure(image("../simulations/data/statistics/dataset/a_hist_P0.4_er7.5.pdf", width: 100%), caption: [`a` coverage, `P_ratio` 0.4, $epsilon_r$ 7.5.]),
 )
 
 #grid(
   columns: (1fr, 1fr),
   gutter: 10pt,
-  figure(image("../simulations/data/statistics/a_hist_P0.4_er7.pdf", width: 100%), caption: [`a` coverage, `P_ratio` 0.4, $epsilon_r$ 7.0.]),
-  figure(image("../simulations/data/statistics/a_hist_P0.5_er4.5.pdf", width: 100%), caption: [`a` coverage, `P_ratio` 0.5, $epsilon_r$ 4.5.]),
+  figure(image("../simulations/data/statistics/dataset/a_hist_P0.4_er7.pdf", width: 100%), caption: [`a` coverage, `P_ratio` 0.4, $epsilon_r$ 7.0.]),
+  figure(image("../simulations/data/statistics/dataset/a_hist_P0.5_er4.5.pdf", width: 100%), caption: [`a` coverage, `P_ratio` 0.5, $epsilon_r$ 4.5.]),
 )
 
 
@@ -602,8 +596,8 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
 #grid(
   columns: (1fr, 1fr),
   gutter: 10pt,
-  figure(image("../simulations/data/statistics/ratio_hist_P0.4_er4.5.pdf", width: 100%), caption: [`ratio` coverage, `P_ratio` 0.4, $epsilon_r$ 4.5.]),
-  figure(image("../simulations/data/statistics/ratio_hist_P0.4_er7.5.pdf", width: 100%), caption: [`ratio` coverage, `P_ratio` 0.4, $epsilon_r$ 7.5.]),
+  figure(image("../simulations/data/statistics/dataset/ratio_hist_P0.4_er4.5.pdf", width: 100%), caption: [`ratio` coverage, `P_ratio` 0.4, $epsilon_r$ 4.5.]),
+  figure(image("../simulations/data/statistics/dataset/ratio_hist_P0.4_er7.5.pdf", width: 100%), caption: [`ratio` coverage, `P_ratio` 0.4, $epsilon_r$ 7.5.]),
 )
 
 - The dominant sets span the full 1.0 to 2.4 range in 15 steps.
@@ -691,6 +685,60 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
 - *Reported errors are converted back to physical units before comparison.*
   - The targets are z-scored, so a loss value is in standardised units. Phase errors quoted in degrees must be obtained by inverting the scaling first.
   - Since $Delta phi$ is a nonlinear function of all four predicted components, the ensemble spread is taken over $Delta phi$ computed per member in physical units, not in scaled space.
+
+=== Model Performance
+- The ensemble was trained on the training portion and evaluated once on the holdout, which played no part in tuning, in the choice of architecture, or in the scaling coefficients.
+- The measured figures are not reproduced in the prose, because they change whenever the dataset, the architecture or the hyperparameters change and a document should not have to be edited for that. The evaluation writes two reports next to the dataset, included here verbatim. The short one covers the overall figures and the per-stratum breakdown; the full one adds the per-ratio detail and the calibration table.
+
+#align(center)[
+  #raw(
+    read("../simulations/data/statistics/model/eval_report.txt"),
+    block: true,
+    lang: "text",
+  )
+]
+
+#align(center)[
+  #raw(
+    read("../simulations/data/statistics/model/eval_report_full.txt"),
+    block: true,
+    lang: "text",
+  )
+]
+
+- *What the statistics mean.*
+  - Both *MAE* and *RMS* are reported for each of the two phase quantities. MAE is the intuitive typical error, while RMS weights large errors quadratically. The latter is what matters for a design decision, since a single badly mispredicted element can send the search to the wrong geometry even when the typical element is accurate.
+  - The *spread* columns are the ensemble disagreement at a fixed input. This is the uncertainty of one member, not of the ensemble mean, and it is discussed separately below.
+  - *z* is the calibration ratio: the RMS error divided by the spread expected of the ensemble mean. It has an expected value of one for a calibrated ensemble.
+  - *cov* is the fraction of samples whose phase error falls inside the interval the spread claims. 95~% is calibrated; well below means the spread understates the error.
+- *The spread is a circular standard deviation, not a linear one.*
+  - The phase and the inter-axis offset are both wrapped angles. A linear standard deviation is only meaningful for angles that share a branch: two members predicting $+179 degree$ and $-179 degree$ differ by $2 degree$ in reality, but the ordinary standard deviation reports $358 degree$.
+  - Because the phase sweeps the full circle as `a` varies, some fraction of any group necessarily sits near the wrap point. Those samples dominate an RMS aggregate, so a small affected fraction is enough to corrupt the whole group: five percent of samples at $180 degree$ among the rest at $2 degree$ already gives about $40 degree$ of apparent spread.
+  - The circular standard deviation is branch independent. It is derived from the mean resultant length $R$ of the member unit vectors,
+    $ sigma = sqrt(-2 ln R), quad R = |1/M sum_(m=1)^M e^(j phi_m)| $
+    and reduces to the ordinary standard deviation for small spreads, which is the regime expected here.
+  - This matters because the inflation is not uniform. It is largest where the true spread is smallest and the angle happens to sit near the wrap point, so a linear statistic both overstates the uncertainty and distorts its distribution across the domain.
+  - The error columns are unaffected, since they are computed from the mean prediction, which is averaged in the complex plane before the phase is extracted.
+- *Accuracy is not uniform across the domain.*
+  - The phase error is smallest at low `a` and grows towards the largest values, so extrapolation towards the edge of the swept interval is weaker than interpolation in the middle.
+  - One configuration is markedly worse: low permittivity at $"ratio" = 1$. Those cells carry several hundred degrees of phase range across the swept `a`, which means a resonance crosses the design frequency inside the interval. The phase is then steep and strongly curved, and it is intrinsically harder to fit.
+  - The same cells are isotropic by construction, so $Delta phi equiv 0$ and they can never satisfy the quadrature condition. They are retained in training so that the model interpolates correctly down to $"ratio" = 1$, but they are excluded from the reported design metric because they are not candidate CP elements.
+- *The ensemble spread describes a single member, not the ensemble mean.*
+  - This is the reason the spread appears so much larger than the error, and it is not a sign that the model performs better than expected.
+  - The error is computed from the *mean* of the $M$ members. The spread is the standard deviation *across* the members at a fixed input, which is the uncertainty of one member.
+  - Averaging $M$ roughly independent predictions reduces the scatter about the truth by $sqrt(M)$. With $M = 10$ the mean should therefore sit about $sigma \/ sqrt(M) approx 0.32 sigma$ from the truth.
+  - The calibration ratio and coverage are accordingly computed against $sigma \/ sqrt(M)$, the expected spread of the mean, rather than against $sigma$. Comparing the error directly with $sigma$ would make a correctly behaving ensemble look conservative by a factor of $sqrt(M)$.
+  - The members are not fully independent, since at $80 %$ geometry coverage two of them share about $64 %$ of their training geometries. The effective $M$ is therefore smaller than the nominal one, so the true reduction lies between $1$ and $sqrt(M)$; the spread remains an upper bound on the error of the mean rather than an estimate of it.
+  - That the standard deviation of a bootstrap ensemble is not a calibrated prediction uncertainty, although it correlates with it and can be calibrated afterwards, is documented by @Hirsch2022. That deep ensembles do not necessarily improve calibration, and depend on subtle trade-offs, is shown by @Rahaman2021.
+- *Where the spread grows, the error follows.*
+  - Beyond roughly $2$~mm of `a`, corresponding to the more elongated cells, the spread increases sharply. This is the intended behaviour: those configurations are closer to resonance, the phase is steeper there, and the members disagree more.
+  - For the inter-axis offset the error and the spread follow the same trend across the whole range, which is what makes the spread usable as a relative guide.
+  - For the absolute phase the two diverge at the largest `a`: the spread grows faster than the error. That is consistent with the members differing in *where* they place the resonance rather than in the overall level, so their disagreement is large while their average is comparatively accurate. It also means the spread should not be read as an error bar specifically in that region.
+  - The calibration is weakest in the elongated, high-permittivity corner, closest to resonance: that is where the spread most understates the error, and where a prediction is most likely to be confidently wrong.
+- *The offset error behaves differently from the absolute phase error.*
+  - Reporting $Delta phi$ separately is essential, because the two axes can be wrong in compensating ways. A model that overestimates both phases by the same amount has a large absolute error and a correct offset, and only the offset error reveals that the CP condition is still satisfied.
+  - The offset error is consistently *smaller* than the absolute phase error, which indicates the two axes are partially correlated: the model captures the common part of the response and the offset follows.
+  - In the isotropic limit the offset becomes ill-conditioned, since $Delta phi$ is the difference of two nearly equal quantities. The offset error there is not meaningful and those cells are excluded as described above.
 
 
 #pagebreak()

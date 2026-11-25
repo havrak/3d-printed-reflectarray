@@ -41,6 +41,22 @@ FILTER_RESONANCE_IN_BAND = False
 # Column name inside the dataset's `band` array that carries the flag.
 RESONANCE_FLAG_COLUMN = "resonance_in_band"
 
+# Exclude the circular cross-section (ratio = 1) from the reported statistics.
+#
+# At ratio = 1 the two axes are physically identical, so the inter-axis offset is
+# the difference of two nearly equal quantities and is ill-conditioned: a small
+# error in either phase produces a large relative error in the difference, and a
+# value near the 0/360 boundary flips sign under a tiny perturbation. The offset
+# is identically zero there, so those cells can never satisfy the quadrature
+# condition and are not candidate CP elements.
+#
+# They are retained in TRAINING so the model interpolates correctly down to
+# ratio = 1, and excluded only from the reported metrics.
+EXCLUDE_RATIO_1 = True
+
+# Aspect ratios within this tolerance of unity count as circular.
+CIRCULAR_RATIO_TOL = 1e-3
+
 
 # --------------------------------------------------------------------------- #
 # Grouping
@@ -267,16 +283,41 @@ DPHI_TOL_DEG = 5.0
 # their random initialisation and data ordering, so the spread across members is
 # an epistemic uncertainty: small where the training data are dense, large where
 # the model is extrapolating.
+
+# Number of members. Ten rather than five because the spread is the point: the
+# sample standard deviation from M members carries a relative error of roughly
+# 1/sqrt(2(M-1)), so M = 5 gives ~35% error on sigma while M = 10 gives ~24%.
+# If sigma is used to decide where to simulate next, that difference matters.
+# Cost is low: members are small and train in seconds.
+N_ENSEMBLE = 10
+
+# How each member's training rows are chosen.
 #
-# The spread is what makes active learning possible and what flags unreliable
-# predictions, so the members must be genuinely independent. Varying the
-# architecture between them would confound the spread with capacity differences.
+#   "fixed"      every member sees the whole training portion, differing only in
+#                seed and batch order. Captures optimisation randomness. Useful
+#                as a baseline: comparing it against the other modes shows how
+#                much the spread grows once data variability is included.
+#   "subsample"  a fraction ENSEMBLE_COVERAGE of the GEOMETRIES, drawn without
+#                replacement. Each member misses a different ~20%, so the spread
+#                picks up data variability while retaining most of the data.
+#   "bootstrap"  geometries drawn with replacement, so ~63% appear per member and
+#                some appear twice. The most diversity and the most data loss.
+#
+# The resampling unit is the geometry, never the individual row. Within one
+# geometry the values along `a` are samples of a single smooth curve, so they
+# are not independent observations: resampling rows would leave every geometry
+# represented in every member, differing only in which points along each curve
+# were dropped, and the members would be nearly identical. The independent unit
+# for "how uncertain am I about a configuration I have not seen" is the geometry.
+ENSEMBLE_SAMPLING = "subsample"     # "fixed" | "subsample" | "bootstrap"
 
-N_ENSEMBLE = 5
+# Fraction of geometries used by "subsample". Ignored by the other modes.
+ENSEMBLE_COVERAGE = 0.8
 
-# Seeds for the members. Distinct from TRAIN_SEED so the ensemble is not a
-# repeat of the tuning runs.
-ENSEMBLE_SEEDS = [101, 202, 303, 404, 505]
+# Base seed for member seeds. Member m uses BASE + m * STRIDE, so the number of
+# members can be changed without editing a list.
+ENSEMBLE_BASE_SEED = 101
+ENSEMBLE_SEED_STRIDE = 101
 
 # Scaling coefficients for the ensemble are fitted on the whole training
 # portion, not per fold, because there are no folds at this stage. The holdout
@@ -307,5 +348,11 @@ ENSEMBLE_LOG_FILENAME = "ensemble_train.log"
 EVAL_SUMMARY_FILENAME = "eval_summary.csv"
 EVAL_STRATA_FILENAME = "eval_by_stratum.csv"
 EVAL_RATIO_FILENAME = "eval_by_ratio.csv"
+EVAL_A_FILENAME = "eval_by_a.csv"
 EVAL_CALIBRATION_FILENAME = "eval_calibration.csv"
 EVAL_REPORT_FILENAME = "eval_report.txt"
+EVAL_REPORT_FULL_FILENAME = "eval_report_full.txt"
+
+# Number of bins along the tuning variable for the extrapolation diagnostic.
+# More bins resolve the edges better but leave fewer samples per bin.
+EVAL_A_BINS = 12

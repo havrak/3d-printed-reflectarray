@@ -299,8 +299,8 @@ refreshWrapper();
         ylim(axr, [0 360]);
 
         lg = legend(ax,  'Location', 'southwest'); lg.Interpreter = 'none';
-        lg = legend(axm, 'Location', 'southwest'); lg.Interpreter = 'none';
-        lg = legend(axr, 'Location', 'northwest'); lg.Interpreter = 'none';
+        %lg = legend(axm, 'Location', 'southwest'); lg.Interpreter = 'none';
+        %lg = legend(axr, 'Location', 'northwest'); lg.Interpreter = 'none';
 
         title(ax, 'Phase vs a  (red circles = usable points)');
 

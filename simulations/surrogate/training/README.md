@@ -352,6 +352,31 @@ small where training data are dense, large where the model is extrapolating.
 Varying the architecture between members would confound the spread with capacity
 differences and the uncertainty would stop meaning anything.
 
+`ENSEMBLE_SAMPLING` selects how each member's rows are chosen:
+
+| mode | each member sees | spread captures |
+|---|---|---|
+| `fixed` | the whole training portion | optimisation randomness only |
+| `bootstrap` | a bootstrap resample of **geometries** | optimisation + data variability |
+
+**The resampling unit is the geometry, never the individual row.** Within one
+geometry the values along `a` are samples of a single smooth curve, so they are
+not independent observations. Resampling rows would leave every geometry
+represented in every member, differing only in which points along each curve
+were dropped, and the members would be nearly identical — the spread would then
+measure optimisation noise only, and would be an underestimate that nothing
+would reveal.
+
+Bootstrap draws geometries with replacement, so roughly 37% are absent from each
+member and some appear twice. With a few hundred geometries that is a real loss
+per member, which the ensemble mean recovers; the benefit is that the spread
+then reflects data variability as well.
+
+**`N_ENSEMBLE` defaults to 10.** The sample standard deviation from `M` members
+carries a relative error of about `1/sqrt(2(M-1))`: 35% at `M = 5`, 24% at
+`M = 10`. If the spread is used to decide where to simulate next, that
+difference matters, and members train in seconds.
+
 **The scaler is fitted on the whole training portion**, since there are no folds
 at this stage. It is applied unchanged to the holdout, which was not part of the
 fit — the same rule as for a fold.
@@ -376,9 +401,21 @@ visible after the fact.
 
 ```bash
 python evaluate.py --dataset ../data-processor/out/dataset.npz
+python evaluate.py --dataset ../data-processor/out/dataset.npz \
+                   --out ../data/statistics/model
 ```
 
-The full ensemble is run over the test rows and the metrics are reported for:
+| flag | default | meaning |
+|---|---|---|
+| `--dataset` | required | path to `dataset.npz` |
+| `--out` | the dataset's directory | where the CSVs and report are written; created if absent |
+| `--ensemble`, `--meta`, `--holdout` | beside the dataset | inputs |
+| `--device` | `cpu` | torch device |
+| `--tol` | `config.DPHI_TOL_DEG` | offset tolerance |
+
+Note that `--out` affects only the **outputs**. The ensemble, metadata and holdout
+split are always read from the dataset's directory unless overridden explicitly,
+so redirecting the results does not break the inputs.
 
 - **overall**
 - **per stratum** — using the hand-written strata from `config.STRATA`
@@ -394,12 +431,54 @@ The full ensemble is run over the test rows and the metrics are reported for:
 | `dphi_within` | fraction whose predicted offset is within `DPHI_TOL_DEG` |
 | `mag_err_mean` | error of `|R|`, averaged over both axes |
 | `ar_err_mean_db` | axial-ratio error implied by the predicted coefficients |
+| `sigma_phi_mean` / `p95` | ensemble spread of `phi_major`, degrees |
+| `sigma_dphi_mean` / `p95` | ensemble spread of the offset, degrees |
+| `z_phi_mean` | calibration ratio, see below |
+| `coverage_95` | fraction whose error falls inside the claimed `1.96 sigma` |
 
 The offset is reported separately from the absolute phase because the two are
 not implied by each other. The axes can be wrong in **compensating** ways, which
 gives a good absolute error and a correct offset, or in **opposing** ways, which
 gives the same absolute error and a drifted offset. Only the second is a problem,
 and only the offset error reveals it.
+
+### The calibration ratio
+
+`z_phi_mean` is defined as
+
+```
+z = |error| / sigma
+```
+
+taken **per sample** and then averaged. This is the standard normalised
+residual, so its scale is the familiar one: a well-calibrated Gaussian posterior
+gives `E[z] ≈ 0.8`, not 1, because the mean of a half-normal is `sqrt(2/pi)`.
+
+| `z` | reading |
+|---|---|
+| ≈ 0.8 | calibrated |
+| > 0.8 | overconfident — sigma understates the real error, so it cannot be used as a filter |
+| < 0.8 | conservative — sigma overstates it |
+
+The per-sample ratio matters. Averaging the error and the sigma separately and
+then dividing would let a few large-sigma samples cancel a few large errors,
+which hides exactly the miscalibration you are looking for.
+
+`coverage_95` is the complementary check: the fraction whose error actually falls
+inside the claimed `1.96 sigma`. For a calibrated Gaussian that is 95%.
+
+### Extrapolation diagnostic
+
+Every grouping also reports the **mean ensemble spread** and the ratio of actual
+error to claimed uncertainty (`err/sig`). Above one means the model is
+overconfident in that group: the spread understates the real error, so the
+uncertainty cannot be trusted as a filter.
+
+The `eval_by_a.csv` table bins the test rows along the tuning variable. This is
+where extrapolation would show: the phase slope steepens towards resonance, so
+if the model knows it is less sure there, `sigma` should rise towards the ends of
+the interval. A flat `sigma` alongside a rising error means it does not, and the
+uncertainty is not a usable guide for where to simulate next.
 
 ### Calibration
 
@@ -419,8 +498,41 @@ per-component variances.
 | `eval_summary.csv` | overall metrics plus mean ensemble spread |
 | `eval_by_stratum.csv` | one row per stratum |
 | `eval_by_ratio.csv` | one row per ratio within each stratum |
+| `eval_by_a.csv` | one row per bin along the tuning variable |
 | `eval_calibration.csv` | sigma bins versus observed coverage |
 | `eval_report.txt` | human-readable summary |
+
+## Plots
+
+`plots.py` reads the evaluation CSVs and produces the figures.
+
+```bash
+python plots.py --dataset ../data-processor/out/dataset.npz
+python plots.py --dataset ../data-processor/out/dataset.npz \
+                --out ../data/statistics/model
+```
+
+| flag | default | meaning |
+|---|---|---|
+| `--dataset` | required | the evaluation CSVs are read from its directory |
+| `--out` | the dataset's directory | where the PDFs are written; created if absent |
+| `--tol` | `5.0` | offset tolerance for the reference line |
+
+`--out` lets the figures go into the thesis's statistics directory while the CSVs
+stay beside the dataset, or both can be redirected together by passing the same
+path to `evaluate.py` and `plots.py`.
+
+| figure | what it shows |
+|---|---|
+| `plot_error_vs_a.pdf` | error and sigma against the tuning variable, plus the within-tolerance fraction |
+| `plot_error_vs_ratio.pdf` | error and sigma against elongation, one line per stratum |
+| `plot_error_by_stratum.pdf` | grouped bars comparing error and sigma per stratum |
+| `plot_calibration.pdf` | observed coverage against nominal, with the mean deviation annotated |
+
+The `a` figure is the extrapolation diagnostic: if `sigma` rises towards the ends
+of the interval alongside the error, the model knows where it is unsure. If the
+error rises while `sigma` stays flat, it does not, and no uncertainty-based
+filter will catch it.
 
 ## Intended workflow
 
