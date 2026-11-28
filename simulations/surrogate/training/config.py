@@ -183,7 +183,7 @@ SEARCH_SPACE = {
     "n_layers":     {"type": "int", "low": 2, "high": 6},
     "width":        {"type": "int", "low": 64, "high": 512, "log": True},
     "activation":   {"type": "categorical", "choices": ["SiLU", "ELU", "GELU"]},
-    "lr":           {"type": "float", "low": 1e-4, "high": 1e-2, "log": True},
+    "lr":           {"type": "float", "low": 5e-5, "high": 6e-3, "log": True},
     "weight_decay": {"type": "float", "low": 1e-5, "high": 1e-2, "log": True},
 }
 
@@ -253,14 +253,49 @@ PRUNER_WARMUP_EPOCHS = 30
 # rate; the budget is generous enough that early stopping, not the cap, decides
 # when training ends.
 
-MAX_EPOCHS = 400
+MAX_EPOCHS = 800
 
-# Stop a fold when the validation loss has not improved for this many epochs.
+# Stop a fold when the stopping metric has not improved for this many epochs.
 EARLY_STOP_PATIENCE = 40
 
-# Minimum relative improvement counted as progress, so noise does not reset the
-# patience counter.
-EARLY_STOP_MIN_DELTA = 1e-5
+# How much improvement counts as progress, so noise does not reset the patience
+# counter.
+#
+# The stopping metric is the objective with the slope term removed:
+#
+#     stop_loss = MSE_4(complex coefficients) + lambda_pass * passivity
+#
+# Early stopping must not follow a term whose weight and noise are both
+# incidental to the design task. The slope is a derivative, heavy-tailed by
+# construction, and in practice supplies most of the total loss: at
+# cx ~ 0.002 and sl ~ 0.03 with W_SLOPE = 0.1, the slope contributes roughly
+# 60% of the objective. Its plateau is therefore noisy, and patience applied to
+# the total fires on a signal that is mostly measuring the least design-relevant
+# component.
+#
+# Two ways of expressing the threshold, selected by EARLY_STOP_DELTA_MODE.
+#
+#   "absolute"  a fixed improvement in loss units. Simple, but the right value
+#               depends on the loss scale, which depends on the learning rate --
+#               and the learning rate is itself being searched. A single
+#               threshold is therefore necessarily wrong for part of the space:
+#               a trial at lr = 4e-3 oscillates with a larger amplitude than one
+#               at lr = 2e-3, so the same delta is strict for one and loose for
+#               the other.
+#
+#   "relative"  a fraction of the current best loss, so numerator and
+#               denominator scale together and the learning-rate dependence
+#               largely cancels. EARLY_STOP_REL_DELTA = 1e-3 reads as "stop when
+#               we are no longer improving by 0.1% per epoch", which is a
+#               statement that can be judged without knowing the loss magnitude.
+EARLY_STOP_DELTA_MODE = "relative"      # "relative" | "absolute"
+
+# Used when the mode is "relative": improvement must exceed this fraction of the
+# best stop_loss seen so far.
+EARLY_STOP_REL_DELTA = 1e-5
+
+# Used when the mode is "absolute": a fixed improvement in loss units.
+EARLY_STOP_MIN_DELTA = 1e-6
 
 # Fixed for reproducibility of a trial.
 TRAIN_SEED = 0
@@ -319,6 +354,41 @@ ENSEMBLE_COVERAGE = 0.8
 ENSEMBLE_BASE_SEED = 101
 ENSEMBLE_SEED_STRIDE = 101
 
+# How long each member trains.
+#
+# There is no validation set at this stage, so early stopping is not available
+# and a fixed budget is needed. That budget is taken from cross-validation,
+# which measured where each fold actually reached its best validation loss: the
+# ensemble is then trained for the same duration on the full training portion.
+#
+# This matters because cv_tune restores the best-epoch snapshot before
+# reporting, so the cross-validated models were all taken at their optimum.
+# Training the ensemble for MAX_EPOCHS regardless would save models at an
+# arbitrary later point, past the optimum, with no way to detect it.
+#
+# The selection rule:
+#
+#   "median"   the median stopping epoch of the winning trial's folds. Balanced,
+#              but hides a bimodal distribution where some folds stop very early
+#              and others run to the cap.
+#   "max"      the latest stopping epoch, so no fold's optimum is truncated.
+#              Safest if the distribution is wide; the members then train past
+#              the optimum of the earlier-stopping folds.
+#   "min"      the earliest, giving the shortest training. Only sensible if the
+#              folds agree closely.
+#
+# ENSEMBLE_EPOCHS_MULTIPLIER accounts for the ensemble seeing more data than a
+# fold: each fold trains on 80 % of the training portion, the ensemble on all of
+# it, and more data usually shifts the optimum slightly later.
+ENSEMBLE_EPOCH_SELECT = "median"    # "min" | "median" | "max"
+ENSEMBLE_EPOCHS_MULTIPLIER = 1.4
+
+# Upper bound, so a pathological cross-validation result cannot produce an
+# absurd training run. Also the fallback when cv_best_params.npz carries no
+# epoch information, which happens for runs made before it was recorded.
+ENSEMBLE_EPOCHS_MAX = 2000
+ENSEMBLE_EPOCHS_FALLBACK = MAX_EPOCHS
+
 # Scaling coefficients for the ensemble are fitted on the whole training
 # portion, not per fold, because there are no folds at this stage. The holdout
 # was not part of that fit, so the rule "coefficients come from training data"
@@ -353,6 +423,37 @@ EVAL_CALIBRATION_FILENAME = "eval_calibration.csv"
 EVAL_REPORT_FILENAME = "eval_report.txt"
 EVAL_REPORT_FULL_FILENAME = "eval_report_full.txt"
 
-# Number of bins along the tuning variable for the extrapolation diagnostic.
-# More bins resolve the edges better but leave fewer samples per bin.
-EVAL_A_BINS = 12
+# --------------------------------------------------------------------------- #
+# Binning of the tuning variable for the extrapolation diagnostic
+# --------------------------------------------------------------------------- #
+#
+# The diagnostic bins the test rows along `a` and reports the error and spread
+# per bin, which is how a degradation towards the edges of the swept interval
+# becomes visible.
+#
+# Two things are configurable and they answer different questions.
+#
+#   EVAL_A_BIN_MODE = "count"
+#       Split the swept range into EVAL_A_BINS equal-width bins. Bin width
+#       follows the range, so extending the sweep widens the bins. Good for a
+#       quick look at the overall trend.
+#
+#   EVAL_A_BIN_MODE = "width"
+#       Fixed bin width of EVAL_A_BIN_WIDTH_MM. Bin count follows the range, so
+#       the resolution stays the same when the sweep is extended. Better when
+#       comparing runs whose `a` ranges differ, or when the interesting feature
+#       (a resonance crossing) has a known physical width.
+#
+# Bins are always taken over `a` only. Ratios are not part of the binning: they
+# are a separate stratification of the same data, reported by the per-ratio
+# table, and mixing the two would make a bin an arbitrary union of geometries
+# that share nothing but a coordinate.
+
+EVAL_A_BIN_MODE = "count"       # "count" | "width"
+EVAL_A_BINS = 16                # used when mode is "count"
+EVAL_A_BIN_WIDTH_MM = 0.15      # used when mode is "width"
+
+# Minimum samples a bin needs to be reported. A bin below this is skipped rather
+# than printed with a meaningless statistic; the count column shows how the
+# samples actually fall, which is itself part of the diagnostic.
+EVAL_A_MIN_PER_BIN = 20

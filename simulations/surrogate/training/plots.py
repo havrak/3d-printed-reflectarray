@@ -89,7 +89,7 @@ def plot_error_vs_a(rows: list[dict], out_path: Path, tol: float) -> None:
     ax2.legend(fontsize=8)
 
     ax3.plot(a_mid, [100.0 * r["dphi_within"] for r in rows], "^-", color="C2")
-    ax3.axhline(tol, linestyle=":", color="grey",
+    ax3.axhline(100-tol, linestyle=":", color="grey",
                 label=f"{tol:g} deg tolerance")
     ax3.set_xlabel("a (mm)")
     ax3.set_ylabel("within tolerance (%)")

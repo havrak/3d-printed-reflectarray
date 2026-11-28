@@ -123,8 +123,25 @@ def mse_loss(
     ).mean()
 
     total = complex_mse + w_slope * slope_mse + lambda_pass * passivity
+
+    # Stopping metric: the same objective with the slope term removed.
+    #
+    # Early stopping must not be driven by a term whose weight and noise are
+    # both incidental to the design task. The slope is a derivative, heavy-tailed
+    # by construction, and in practice contributes most of the total loss: at
+    # cx ~ 0.002 and sl ~ 0.03 with w_slope = 0.1, the slope supplies roughly
+    # 60% of the objective. Its plateau is therefore noisy, and patience applied
+    # to the total fires on a signal that is mostly measuring the least relevant
+    # component.
+    #
+    # The complex coefficients are what the phase accuracy depends on, so they
+    # drive the stopping decision. Passivity is retained because a violation is a
+    # genuine model failure rather than noise.
+    stop_loss = complex_mse + lambda_pass * passivity
+
     return total, {
         "complex_mse": float(complex_mse.detach()),
         "slope_mse": float(slope_mse.detach()),
         "passivity": float(passivity.detach()),
+        "stop_loss": float(stop_loss.detach()),
     }

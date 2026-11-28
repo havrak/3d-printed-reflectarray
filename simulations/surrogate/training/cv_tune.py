@@ -273,7 +273,9 @@ def train_fold(
     batch = config.BATCH_SIZE
 
     best_loss = float("inf")
+    best_stop_loss = float("inf")
     best_state = None
+    best_epoch = -1
     since_improved = 0
 
     for epoch in range(config.MAX_EPOCHS):
@@ -308,13 +310,37 @@ def train_fold(
                 slope_clip=config.SLOPE_CLIP_SIGMA,
             )
         val_loss = float(val_loss)
+        # Patience follows the complex-coefficient term, not the total: the slope
+        # contributes most of the total and is the noisiest part of it, so
+        # stopping on the total means stopping on a signal that mostly measures
+        # the least design-relevant component.
+        stop_loss = val_parts["stop_loss"]
 
         if report_epoch is not None:
-            report_epoch(epoch, val_loss)
+            report_epoch(epoch, stop_loss)
 
-        if val_loss < best_loss - config.EARLY_STOP_MIN_DELTA:
+        # Improvement threshold, in whichever units the config selects. The
+        # relative form scales with the loss, so a single setting works across
+        # trials whose learning rates give different loss magnitudes.
+        if config.EARLY_STOP_DELTA_MODE == "relative":
+            threshold = config.EARLY_STOP_REL_DELTA * best_stop_loss
+            if not np.isfinite(threshold):
+                threshold = 0.0
+        elif config.EARLY_STOP_DELTA_MODE == "absolute":
+            threshold = config.EARLY_STOP_MIN_DELTA
+        else:
+            raise ValueError(
+                f"unknown EARLY_STOP_DELTA_MODE {config.EARLY_STOP_DELTA_MODE!r}"
+            )
+
+        if stop_loss < best_stop_loss - threshold:
+            best_stop_loss = stop_loss
             best_loss = val_loss
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            # The epoch at which this fold was at its best. Recorded because the
+            # ensemble is later trained for a duration derived from these, and a
+            # single median would hide a bimodal distribution.
+            best_epoch = epoch
             since_improved = 0
         else:
             since_improved += 1
@@ -374,6 +400,8 @@ def train_fold(
 
     return {
         "val_loss": best_loss,
+        "stop_loss": best_stop_loss,
+        "best_epoch": int(best_epoch),
         "complex_mse": parts["complex_mse"],
         "slope_mse": parts["slope_mse"],
         "passivity": parts["passivity"],
@@ -468,6 +496,7 @@ def run_tuning(
         # is reported alongside so a high-variance configuration is visible even
         # when its mean looks good.
         losses = np.array([m["val_loss"] for m in fold_metrics])
+        epochs = [int(m["best_epoch"]) for m in fold_metrics]
         record = {
             "trial": trial.number,
             **params,
@@ -478,6 +507,14 @@ def run_tuning(
             "dphi_err_mean_deg": float(np.mean([m["dphi_err_mean_deg"] for m in fold_metrics])),
             "dphi_err_p95_deg": float(np.mean([m["dphi_err_p95_deg"] for m in fold_metrics])),
             "dphi_within_tol": float(np.mean([m["dphi_within_tol"] for m in fold_metrics])),
+            # One column per fold rather than a single aggregate: a bimodal
+            # distribution of stopping epochs would be invisible in a median,
+            # and it is exactly the case that means the learning rate is badly
+            # matched to the epoch budget.
+            **{f"epoch_fold{f}": e for f, e in enumerate(epochs)},
+            "epoch_min": int(np.min(epochs)),
+            "epoch_median": int(np.median(epochs)),
+            "epoch_max": int(np.max(epochs)),
         }
         records.append(record)
 
@@ -487,6 +524,7 @@ def run_tuning(
             f"phi_err {record['phase_err_mean_deg']:.2f} deg  "
             f"dphi_err {record['dphi_err_mean_deg']:.2f} deg  "
             f"({100 * record['dphi_within_tol']:.0f}% within {config.DPHI_TOL_DEG:.0f})  "
+            f"epochs {epochs}  "
             f"layers {params['n_layers']} width {params['width']} "
             f"act {params['activation']} lr {params['lr']:.2e}",
             flush=True,
@@ -499,6 +537,7 @@ def run_tuning(
                 f"phi_err {record['phase_err_mean_deg']:.2f} deg  "
                 f"dphi_err {record['dphi_err_mean_deg']:.2f} deg  "
                 f"dphi_ok {100 * record['dphi_within_tol']:.0f}%  "
+                f"epochs {epochs}  "
                 f"layers {params['n_layers']} width {params['width']} "
                 f"act {params['activation']} lr {params['lr']:.2e}\n"
             )
@@ -616,6 +655,16 @@ def main(argv: list[str] | None = None) -> int:
     # ---- write ----
     out_dir = dataset_path.parent
 
+    # Epoch statistics of the WINNING trial, not of the whole study: the
+    # ensemble will be trained with the winning hyperparameters, so those are
+    # the epochs that matter.
+    best_record = min(records, key=lambda r: r["val_loss_mean"])
+    best_epochs = [best_record[f"epoch_fold{f}"] for f in range(args.folds)]
+
+    print(f"\nbest trial epochs per fold: {best_epochs}")
+    print(f"  min {min(best_epochs)}  median {int(np.median(best_epochs))}  "
+          f"max {max(best_epochs)}")
+
     params_path = out_dir / config.BEST_PARAMS_FILENAME
     np.savez_compressed(
         params_path,
@@ -625,6 +674,19 @@ def main(argv: list[str] | None = None) -> int:
         folds=np.int64(args.folds),
         dataset=np.array(str(dataset_path)),
         splits=np.array(str(folds_path)),
+        # Per-fold stopping epochs of the winning trial, so the ensemble can be
+        # trained for a duration derived from what cross-validation measured.
+        best_epochs=np.array(best_epochs, dtype=np.int64),
+        best_epoch_min=np.int64(min(best_epochs)),
+        best_epoch_median=np.int64(int(np.median(best_epochs))),
+        best_epoch_max=np.int64(max(best_epochs)),
+        # Stopping rule actually used, so the epoch distribution can be read
+        # against the criterion that produced it.
+        early_stop_mode=np.array(config.EARLY_STOP_DELTA_MODE),
+        early_stop_patience=np.int64(config.EARLY_STOP_PATIENCE),
+        early_stop_rel_delta=np.float64(config.EARLY_STOP_REL_DELTA),
+        early_stop_min_delta=np.float64(config.EARLY_STOP_MIN_DELTA),
+        max_epochs=np.int64(config.MAX_EPOCHS),
     )
     print(f"\nwrote {params_path}")
 

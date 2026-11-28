@@ -77,6 +77,58 @@ def tuned_params(path: Path) -> dict:
     return out
 
 
+def ensemble_epochs(params_file: Path) -> tuple[int, str]:
+    """
+    Training duration for each member, derived from cross-validation.
+
+    Cross-validation recorded the epoch at which each fold of the winning trial
+    reached its best validation loss. Because `train_fold` restores that
+    snapshot before reporting, the cross-validated models were all taken at
+    their optimum; the ensemble has no validation set and therefore no early
+    stopping, so it needs that duration supplied from outside.
+
+    The rule is selected by ENSEMBLE_EPOCH_SELECT and scaled by
+    ENSEMBLE_EPOCHS_MULTIPLIER, since the ensemble trains on the whole training
+    portion while a fold sees only 80 % of it.
+
+    Returns the epoch count and a short description for the log. Falls back to
+    ENSEMBLE_EPOCHS_FALLBACK when the file carries no epoch information, which
+    is the case for runs made before it was recorded.
+    """
+    with np.load(params_file, allow_pickle=False) as data:
+        has_epochs = "best_epochs" in data
+        if not has_epochs:
+            n = int(config.ENSEMBLE_EPOCHS_FALLBACK)
+            return n, "fallback (no epoch information in cv_best_params.npz)"
+
+        epochs = np.asarray(data["best_epochs"], dtype=int)
+        fold_median = int(np.median(epochs))
+
+    rule = config.ENSEMBLE_EPOCH_SELECT
+
+    if rule == "min":
+        base = int(epochs.min())
+    elif rule == "median":
+        base = fold_median
+    elif rule == "max":
+        base = int(epochs.max())
+    else:
+        raise ValueError(f"unknown ENSEMBLE_EPOCH_SELECT {rule!r}")
+
+    scaled = int(round(base * float(config.ENSEMBLE_EPOCHS_MULTIPLIER)))
+    capped = min(scaled, int(config.ENSEMBLE_EPOCHS_MAX))
+
+    desc = (
+        f"{rule} of per-fold epochs {epochs.tolist()} "
+        f"(fold median {fold_median}) -> {base} "
+        f"x {config.ENSEMBLE_EPOCHS_MULTIPLIER} -> {scaled}"
+    )
+    if capped != scaled:
+        desc += f", capped at ENSEMBLE_EPOCHS_MAX {config.ENSEMBLE_EPOCHS_MAX}"
+
+    return capped, desc
+
+
 # --------------------------------------------------------------------------- #
 # Resampling
 # --------------------------------------------------------------------------- #
@@ -188,17 +240,24 @@ def train_member(
     seed: int,
     device: str,
     log,
+    n_epochs: int | None = None,
 ) -> tuple[dict, list[tuple[int, float]]]:
     """
     Train one ensemble member on the full training portion.
 
     There is no validation set at this stage, so early stopping cannot be used.
-    Instead the member trains for a fixed number of epochs, and the training
-    loss curve is logged so a failure to converge is visible after the fact.
+    Instead the member trains for a fixed number of epochs, derived from what
+    cross-validation measured, and the training loss curve is logged so a
+    failure to converge is visible after the fact.
+
+    `n_epochs` defaults to config.MAX_EPOCHS when not supplied.
 
     Returns the state dict and the loss history.
     """
     import torch
+
+    if n_epochs is None:
+        n_epochs = int(config.MAX_EPOCHS)
 
     torch.manual_seed(seed)
     if device.startswith("cuda"):
@@ -229,7 +288,7 @@ def train_member(
     batch = config.BATCH_SIZE
     history: list[tuple[int, float]] = []
 
-    for epoch in range(config.MAX_EPOCHS):
+    for epoch in range(n_epochs):
         model.train()
         perm = torch.randperm(n, device=device)
         total = 0.0
@@ -254,7 +313,7 @@ def train_member(
         epoch_loss = total / n
         history.append((epoch, epoch_loss))
 
-        if epoch % config.LOG_EVERY_N_EPOCHS == 0 or epoch == config.MAX_EPOCHS - 1:
+        if epoch % config.LOG_EVERY_N_EPOCHS == 0 or epoch == n_epochs - 1:
             log(f"    epoch {epoch:4d}  train_loss {epoch_loss:.5f}")
 
     return {k: v.detach().clone() for k, v in model.state_dict().items()}, history
@@ -352,6 +411,10 @@ def main(argv: list[str] | None = None) -> int:
     log(f"params: {params}")
     log(f"sampling: {config.ENSEMBLE_SAMPLING}")
 
+    # Training duration, taken from what cross-validation measured.
+    n_epochs, epoch_desc = ensemble_epochs(params_path)
+    log(f"epochs per member: {n_epochs}  ({epoch_desc})")
+
     # Geometry ids, needed only when resampling. Computed once, over the full
     # dataset, so the ids are stable across members.
     groups = None
@@ -390,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
 
         state, history = train_member(
             params, X_train[rows], Y_train[rows], y_mean, y_std,
-            seed=seed, device=device, log=log,
+            seed=seed, device=device, log=log, n_epochs=n_epochs,
         )
         states.append(state)
         histories.append(history)
@@ -429,7 +492,9 @@ def main(argv: list[str] | None = None) -> int:
         activation=np.array(params["activation"]),
         lr=np.float64(params["lr"]),
         weight_decay=np.float64(params["weight_decay"]),
-        max_epochs=np.int64(config.MAX_EPOCHS),
+        max_epochs=np.int64(n_epochs),
+        epoch_select=np.array(config.ENSEMBLE_EPOCH_SELECT),
+        epoch_multiplier=np.float64(config.ENSEMBLE_EPOCHS_MULTIPLIER),
         feature_names=dataset["feature_names"],
         target_names=dataset["target_names"],
         dataset=np.array(str(dataset_path)),

@@ -127,6 +127,39 @@ def _wrap(err_deg: np.ndarray) -> np.ndarray:
     return np.abs(np.remainder(err_deg + 180.0, 360.0) - 180.0)
 
 
+def make_a_bin_edges(a_mm: np.ndarray) -> np.ndarray:
+    """
+    Bin edges along the tuning variable, from config.EVAL_A_BIN_MODE.
+
+    "count"  splits the swept range into EVAL_A_BINS equal-width bins, so the
+             width follows the range. Extending the sweep widens every bin.
+    "width"  uses a fixed EVAL_A_BIN_WIDTH_MM, so the count follows the range and
+             the resolution stays the same when the sweep changes.
+
+    The fixed-width mode is the one to use when comparing runs whose `a` ranges
+    differ, or when the feature of interest has a known physical scale.
+    """
+    lo = float(a_mm.min())
+    hi = float(a_mm.max())
+
+    if hi <= lo:
+        return np.array([lo, lo])
+
+    mode = config.EVAL_A_BIN_MODE
+
+    if mode == "count":
+        return np.linspace(lo, hi, int(config.EVAL_A_BINS) + 1)
+
+    if mode == "width":
+        width = float(config.EVAL_A_BIN_WIDTH_MM)
+        if width <= 0:
+            raise ValueError("EVAL_A_BIN_WIDTH_MM must be positive")
+        n = max(1, int(np.ceil((hi - lo) / width)))
+        return np.linspace(lo, hi, n + 1)
+
+    raise ValueError(f"unknown EVAL_A_BIN_MODE {mode!r}")
+
+
 def circular_std_deg(angles_deg: np.ndarray, axis: int = 0) -> np.ndarray:
     """
     Circular standard deviation of wrapped angles, in degrees.
@@ -691,12 +724,18 @@ def main(argv: list[str] | None = None) -> int:
           f"  {'':>5}  {'':>5}")
     print("  " + "-" * 92)
 
-    edges = np.linspace(a_mm.min(), a_mm.max(), config.EVAL_A_BINS + 1)
+    edges = make_a_bin_edges(a_mm)
     for i in range(len(edges) - 1):
         lo, hi = edges[i], edges[i + 1]
         # Include the right edge in the last bin so the maximum is not lost.
         mask = (a_mm >= lo) & (a_mm < hi) if i < len(edges) - 2 else (a_mm >= lo)
-        if not np.any(mask):
+        n_bin = int(np.count_nonzero(mask))
+        if n_bin < config.EVAL_A_MIN_PER_BIN:
+            # Skipped rather than reported: a statistic over a handful of
+            # samples says more about which geometries landed there than about
+            # the model. The count is printed so the gap is visible.
+            print(f"  {lo:6.3f}-{hi:6.3f}  {n_bin:6d}   "
+                  f"(below EVAL_A_MIN_PER_BIN = {config.EVAL_A_MIN_PER_BIN})")
             continue
 
         sub_pred = {k: v[mask] for k, v in pred_q.items()}

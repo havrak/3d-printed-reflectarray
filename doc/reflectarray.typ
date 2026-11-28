@@ -621,16 +621,21 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
   - Automating the sweep so that it can be driven by the surrogate's own uncertainty is the natural next step, and is what the Sobol sampling discussed above is intended for.
 
 == Training
+
 === Dataset Splitting
 - *The unit of splitting is the geometry, not the sample.*
   - Each row of the dataset is one value of the tuning variable `a`, belonging to one geometry. A geometry is the sweep along `a` at a fixed tuple $(P_"ratio", epsilon_r, H_"pillar", "ratio")$.
   - The dataset therefore has of order $10^4$ rows but only a few hundred geometries: the rows are strongly correlated within each sweep.
-  - A sample-level split would place different `a` values of the same geometry on both sides of the split. The model would then be evaluated on a curve it had already seen during training, differing only along one axis, and the resulting score would measure interpolation *inside a known configuration* rather than the ability to predict an unseen one.
-  - Since the surrogate exists to propose geometries that were never simulated, that would test the wrong thing. All `a` values of a geometry therefore go to the same side, and the group key is the full fixed-parameter tuple.
-  - This is the mechanism that prevents leakage. Stratification, discussed next, does not.
+  - A sample-level split would place different `a` values of the same geometry on both sides of the split.
+    - The model would then be evaluated on a curve it had already seen during training, differing only along one axis.
+    - The resulting score would measure interpolation *inside a known configuration* rather than the ability to predict an unseen one.
+  - All `a` values of a geometry therefore go to the same side, and the group key is the full fixed-parameter tuple.
+  - This is the mechanism that prevents leakage.
 - *Grouping and stratification do different jobs.*
-  - Grouping removes the correlation-induced optimism in the error estimate. It is what makes the number meaningful at all.
-  - Stratification only controls *how groups are distributed* across folds, so that each fold is compositionally similar to the others and the fold-to-fold spread reflects the model rather than the accident of the split. It reduces the variance of the estimate, not its bias.
+  - Grouping removes the correlation-induced optimism in the error estimate.
+  - Stratification controls *how groups are distributed* across folds, so that each fold is compositionally similar to the others.
+    - Fold-to-fold spread reflects the model rather than the accident of the split. (Given the nature of the dataset k-fold with $k=5$ doesn't suppress possibility of great split as on other problems).
+    - It reduces the variance of the estimate, not its bias.
 - *The strata are written by hand rather than derived from the parameter values.*
   - The natural stratification is on the $(P_"ratio", epsilon_r)$ cell, since these are fabrication choices rather than continuous design variables and they carry the least coverage by design.
   - However, two of the cells carry only about a dozen geometries each. Splitting them individually would leave roughly two geometries per validation fold, and the per-fold error would be dominated by which particular geometries happened to be held out rather than by the model.
@@ -645,19 +650,21 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
       [*Stratum*], [*Composition*], [*Note*],
       [`P0.4_er4.5`], [`P_ratio` 0.4, $epsilon_r$ 4.5], [largest cell, swept across all ratios],
       [`P0.4_er5-6`], [`P_ratio` 0.4, $epsilon_r$ 5 and 6], [pooled: too few geometries separately],
-      [`P0.4_er7`], [`P_ratio` 0.4, $epsilon_r$ 7], [interpolates between 4.5 and 7.5],
+      [`P0.4_er7`], [`P_ratio` 0.4, $epsilon_r$ 7], [-],
       [`P0.4_er7.5`], [`P_ratio` 0.4, $epsilon_r$ 7.5], [largest cell, swept across all ratios],
-      [`P0.5_er4.5`], [`P_ratio` 0.5, $epsilon_r$ 4.5], [larger cell; may be dropped, see above],
+      [`P0.5_er4.5`], [`P_ratio` 0.5, $epsilon_r$ 4.5], [larger cell; DROPPED],
     )
   ]
 
-  - The trade is explicit: a pooled stratum is balanced in total size but not necessarily in composition, so a fold may receive more $epsilon_r = 5$ than $6$. With a dozen geometries, balance matters more than per-cell exactness.
+  - The trade is explicit: a pooled stratum is balanced in total size but not necessarily in composition, so a fold may receive more $epsilon_r = 5$ than $6$.
+    - With a dozen geometries, balance matters more than per-cell exactness.
   - Grouping still uses the exact tuple, so pooling the strata introduces no leakage. Only the granularity of the fold assignment changes.
   - A sample that matches no stratum is reported and placed in a fallback stratum rather than silently absorbed, so a dataset containing an unexpected cell surfaces as a warning instead of a quiet misallocation.
 - *Height is deliberately not stratified.*
   - Stratifying on `H_pillar` as well would be degenerate: there are many height values against only a few hundred geometries, which leaves too few groups per stratum to populate every fold.
   - The consequence is that every fold contains the heights the model is tested on, so the cross-validation estimate is a *best case with respect to height extrapolation*.
   - This is acceptable because the surrogate is queried at heights inside the simulated range, but it should be stated when the CV error is reported.
+  - What could be advantageous with a larger dataset is Stratifying on ratios - currently it's possible that for one ratio (of one strata) the test set will have 400 samples, while for other just 100, even though both have equal amount of samples in the whole dataset.
 - *The holdout is touched once.*
   - The data are divided into a training portion and a holdout, and the holdout is used only for the final evaluation after cross-validation and after the deep ensemble is trained.
   - Looking at it more than once turns it into a validation set, at which point its score stops being an estimate of generalisation error.
@@ -667,11 +674,17 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
   - Such samples remain valid design points, but the phase slope is not a smooth function of geometry near a notch, so they are poor regression targets for the slope.
   - The filter is applied at split time rather than during dataset construction, so the full dataset stays intact on disk and the choice remains reversible.
   - This is distinct from the case of a resonance that sits inside the swept `a` range and is too coarsely sampled to resolve: such sweeps produce phase curves that are not merely noisy but *systematically wrong*, because the unwrapping locks onto the wrong branch. That is a data-quality failure rather than a modelling choice, and it was the reason one of the earlier cells was removed from the dataset rather than filtered.
+  - Idea:
+    - Data aren't filtered out at training - model needs to be able to somehow predict that the configuration will lead to resonance.
+    - At design state we can compute $|R|$ and check it's value, even with large bias these predictions will probably have the $|R|$ should be small enough that resonance can detected.
+    - Unfortunately from ensemble perforamce it's visible that even when the model has significant bias in the configurations with resonance the ensemble spread isn't necessary that larger.
 
 === Normalisation
 - Inputs and targets are z-scored before training, so that the loss operates on quantities of comparable scale and the optimiser does not have to reconcile a feature measured in millimetres with one that is a dimensionless ratio.
-- *Z-scoring is a fit, not a fixed transformation.* It estimates a mean and a standard deviation from data, so it is subject to the same leakage argument as any other fitted step.
-  - Fitting on a set that includes validation rows encodes the location and spread of those rows in the coefficients. The model never sees their labels, but every prediction it makes is shifted by knowledge of where those inputs lie.
+- *Z-scoring is a fit, not a fixed transformation.*
+  - It estimates a mean and a standard deviation from data, so it is subject to the same leakage argument as any other fitted step. Even though the leakage here is fairly small and often just accepted.
+  - Fitting on a set that includes validation rows encodes the location and spread of those rows in the coefficients.
+     - The model never sees their labels, but every prediction it makes is shifted by knowledge of where those inputs lie.
   - The magnitude is small: a scaler is a two-parameter model fitted on hundreds of points, so the mean of a subset differs from the mean of the whole by roughly $sigma \/ sqrt(n)$.
   - It is nonetheless the same failure mode as leaking a feature-selection step, so it is avoided rather than tolerated.
 - *Cross-validation and hyperparameter tuning.*
@@ -686,19 +699,93 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
   - The targets are z-scored, so a loss value is in standardised units. Phase errors quoted in degrees must be obtained by inverting the scaling first.
   - Since $Delta phi$ is a nonlinear function of all four predicted components, the ensemble spread is taken over $Delta phi$ computed per member in physical units, not in scaled space.
 
+=== Training Duration and Early Stopping
+- *Cross-validation uses early stopping, the ensemble does not.*
+  - Each fold holds out part of its training portion, so the validation loss can be monitored and the weights snapshotted at the best epoch.
+  - The ensemble has no such held-out set: its members train on the whole training portion, so there is nothing to monitor and early stopping is not available.
+  - The ensemble therefore needs a fixed duration, and that duration is taken from what cross-validation measured rather than set by hand.
+
+==== The stopping metric
+- Patience is applied to a metric with the slope term removed,
+  $ "stop_loss" = "MSE"_4 (bold(R)) + lambda_"pass" dot "passivity" $
+  rather than to the full objective.
+- The reason is that the slope term carries most of the total loss and most of its epoch-to-epoch noise, while being the least relevant component for the design task.
+  - With $W_"slope" = 0.1$ and typical values $overline("cx") approx 0.002$, $overline("sl") approx 0.03$, the slope supplies roughly $60 %$ of the objective.
+  - The slope is a derivative and therefore heavy-tailed, so its plateau is a noisy signal.
+  - Patience applied to the full objective would therefore fire on a criterion that mostly measures the noisiest and least design-relevant quantity.
+- The slope remains in the gradient during training; only the stopping decision ignores it. Passivity is retained in the stopping metric because a violation is a genuine model failure rather than noise.
+
+==== The improvement threshold
+- Two ways of expressing the threshold are implemented, selected by `EARLY_STOP_DELTA_MODE`.
+  - *Absolute:* a fixed improvement in loss units. Simple, but the right value depends on the loss scale, which depends on the learning rate — and the learning rate is itself being searched.
+    - A trial at $lr = 4 dot 10^(-3)$ oscillates with a larger amplitude than one at $lr = 2 dot 10^(-3)$, so a single threshold is necessarily strict for one and loose for the other.
+  - *Relative:* a fraction of the current best loss, so numerator and denominator scale together and the learning-rate dependence largely cancels. This is the mode used.
+- With `EARLY_STOP_REL_DELTA = 1e-5` and `EARLY_STOP_PATIENCE = 40`, a fold stops when the stopping metric has failed to improve by more than $10^(-5)$ of its best value for forty consecutive epochs.
+- The result is a healthy distribution rather than one clustered at either the cap or the patience limit. For the winning trial the per-fold stopping epochs were $[329, 267, 369, 333, 310]$, that is min $267$, median $329$, max $369$ against a cap of $600$.
+  - The spread across folds is expected: folds differ in composition and therefore in how long they take to converge.
+  - It also means the stopping rule is engaging as intended rather than being suppressed by a threshold that is too small, or firing prematurely through one that is too large.
+
+==== Deriving the ensemble duration
+- The ensemble is trained for
+  $ N_"ensemble" = "round"(N_"CV" dot m) $
+  where $N_"CV"$ is a statistic of the winning trial's per-fold stopping epochs — min, median or max, selected by `ENSEMBLE_EPOCH_SELECT` — and $m$ is `ENSEMBLE_EPOCHS_MULTIPLIER`.
+- The median is used, since the distribution is not bimodal and a median is not distorted by the single slowest fold.
+- *The multiplier is an empirical correction, not a principled constant.*
+  - If cross-validation and the ensemble were minimising the same quantity on the same amount of data, $m = 1$ would be correct.
+  - They are not. Cross-validation stops on an MSE in standardised space, and a mean of squared errors is dominated by the samples with the largest residuals — which are precisely the resonance-crossing configurations. Those plateau early.
+  - The bulk of the samples, which are far better behaved, would keep improving for considerably longer. So the recorded $N_"CV"$ is close to the *MSE* optimum but short of the *MAE* optimum.
+  - The multiplier compensates for that gap. It is best read as "how much longer than the MSE optimum the model must be trained before its typical error stops improving".
+
+==== What the multiplier was set to, and why
+- Several values were tried on the same tuned architecture. The table reports the holdout metrics for each, and the spread of the final training losses across the ten members.
+
+#align(center)[
+  #table(
+    columns: 8,
+    align: center,
+    stroke: none,
+    inset: (x: 5pt, y: 4pt),
+    [*m*], [*MAE* $phi$], [*RMS* $phi$], [*MAE* $Delta phi$], [*RMS* $Delta phi$], [*z*], [*cov*], [*train loss spread*],
+    [1.2], [0.61], [1.13], [0.43], [1.06], [2.52], [61 %], [0.00212],
+    [1.3], [0.45], [1.03], [0.37], [1.04], [2.14], [87 %], [0.00238],
+    [*1.4*], [*0.38*], [*1.01*], [*0.40*], [*1.08*], [*2.18*], [*88 %*], [*0.00287*],
+    [1.5], [0.46], [1.03], [0.40], [1.05], [2.23], [84 %], [0.00140],
+    [1.7], [0.50], [1.00], [0.39], [1.04], [1.81], [82 %], [0.00184],
+  )
+]
+
+- *The MAE improves while the RMS does not, and that is the informative part.*
+  - From $m = 1.2$ to $m = 1.4$ the mean absolute phase error falls by $38 %$, from $0.61 degree$ to $0.38 degree$, while the RMS stays within $1.00$–$1.13 degree$ across all five runs.
+  - If the model were simply under-trained, both would improve together. Their divergence means the bulk of the samples is still improving while the worst samples are not: the error is being redistributed rather than reduced uniformly.
+  - The per-stratum figures confirm this. At $m = 1.4$ the $epsilon_r = 4.5$ cell has MAE $0.32 degree$ against RMS $0.45 degree$, a ratio close to the $1.25$ of a Gaussian. The $epsilon_r = 7.5$ cell has MAE $0.58 degree$ against RMS $1.68 degree$, a ratio of $2.9$ and therefore dominated by outliers. The hard cells are unaffected by training longer; the easy ones are not.
+- *Why $1.4$ was chosen, and why the choice is not load-bearing.*
+  - $1.4$ gives the best mean absolute error and the highest coverage, and its training-loss spread across members is mid-range rather than the smallest or largest.
+  - $1.3$ and $1.5$ are within $0.08 degree$ on MAE and within three percentage points on coverage. The three are effectively equivalent for the design task, so the value is a defensible plateau choice rather than a sharp optimum.
+  - $1.2$ is measurably worse, which is the under-training the multiplier exists to correct.
+  - $1.7$ shows the first signs of the opposite problem: the smallest member training loss improves while the largest gets worse, so the members are beginning to diverge through over-fitting rather than through data variation.
+- *A caveat on how the value was selected.*
+  - The multipliers were compared on the holdout, which strictly converts it into a validation set and makes the reported figures for the chosen value mildly optimistic.
+  - The clean alternative would be to select the multiplier from the cross-validation folds, by tracking a robust statistic of the per-sample error there and finding where it peaks.
+  - Given that $1.3$, $1.4$ and $1.5$ are indistinguishable within noise, the practical consequence is small, but the holdout was consulted more than once and that should be stated rather than implied.
+
+== Ensemble design
+- Number of models in the ensemble was set at 10, the sample standard deviation from M members carries a relative error of @Walpolec2002
+$
+sigma_M = (sigma)/(sqrt(2(M-1)))
+$
+At $M=5$ there error on sigma is 35% for $M=10$ is just 24%. Still it cannot be viewed as exact standard deviation we would get from e.g. Gaussian Process based surrogate model. However the final value is proportional to the correct confidence interval.
+- Different options for creating the ensemble were considered.
+  1. *Reordering* -- whole dataset is used for all ensemble members, just data are fed in different order during the training process. Confidence intervals will probably be overly positive.
+  2. *Bootstrap* -- conventional method how ensembles are created. From dataset size of $N$ a new dataset is created also of size $N$. Distinction being at random some datapoints can be present multiple times, while some can be left out. Problem is that the number of unique configurations (`P_ratio` + `epsilon_r` + `ratio` + `height`) isn't that large -- only couple hundreds. This is suboptimal for bootstrap -- the training sets in each bootstrap would be quite small.
+  3. *Subsamples* -- Similar approach to K-fold used in CV -- A new smaller datasets are created from the original dataset - 80 % of samples are chosen at random for each one.
+
+
 === Model Performance
 - The ensemble was trained on the training portion and evaluated once on the holdout, which played no part in tuning, in the choice of architecture, or in the scaling coefficients.
 - The measured figures are not reproduced in the prose, because they change whenever the dataset, the architecture or the hyperparameters change and a document should not have to be edited for that. The evaluation writes two reports next to the dataset, included here verbatim. The short one covers the overall figures and the per-stratum breakdown; the full one adds the per-ratio detail and the calibration table.
 
 #align(center)[
-  #raw(
-    read("../simulations/data/statistics/model/eval_report.txt"),
-    block: true,
-    lang: "text",
-  )
-]
-
-#align(center)[
+  #set text(size: 8pt)
   #raw(
     read("../simulations/data/statistics/model/eval_report_full.txt"),
     block: true,
@@ -707,7 +794,9 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
 ]
 
 - *What the statistics mean.*
-  - Both *MAE* and *RMS* are reported for each of the two phase quantities. MAE is the intuitive typical error, while RMS weights large errors quadratically. The latter is what matters for a design decision, since a single badly mispredicted element can send the search to the wrong geometry even when the typical element is accurate.
+  - Both *MAE* and *RMS* are reported for each of the two phase quantities.
+    - MAE is the intuitive typical error, while RMS weights large errors quadratically.
+    - The latter is what matters for a design decision, since a single badly mispredicted element can send the search to the wrong geometry even when the typical element is accurate.
   - The *spread* columns are the ensemble disagreement at a fixed input. This is the uncertainty of one member, not of the ensemble mean, and it is discussed separately below.
   - *z* is the calibration ratio: the RMS error divided by the spread expected of the ensemble mean. It has an expected value of one for a calibrated ensemble.
   - *cov* is the fraction of samples whose phase error falls inside the interval the spread claims. 95~% is calibrated; well below means the spread understates the error.
@@ -719,10 +808,6 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
     and reduces to the ordinary standard deviation for small spreads, which is the regime expected here.
   - This matters because the inflation is not uniform. It is largest where the true spread is smallest and the angle happens to sit near the wrap point, so a linear statistic both overstates the uncertainty and distorts its distribution across the domain.
   - The error columns are unaffected, since they are computed from the mean prediction, which is averaged in the complex plane before the phase is extracted.
-- *Accuracy is not uniform across the domain.*
-  - The phase error is smallest at low `a` and grows towards the largest values, so extrapolation towards the edge of the swept interval is weaker than interpolation in the middle.
-  - One configuration is markedly worse: low permittivity at $"ratio" = 1$. Those cells carry several hundred degrees of phase range across the swept `a`, which means a resonance crosses the design frequency inside the interval. The phase is then steep and strongly curved, and it is intrinsically harder to fit.
-  - The same cells are isotropic by construction, so $Delta phi equiv 0$ and they can never satisfy the quadrature condition. They are retained in training so that the model interpolates correctly down to $"ratio" = 1$, but they are excluded from the reported design metric because they are not candidate CP elements.
 - *The ensemble spread describes a single member, not the ensemble mean.*
   - This is the reason the spread appears so much larger than the error, and it is not a sign that the model performs better than expected.
   - The error is computed from the *mean* of the $M$ members. The spread is the standard deviation *across* the members at a fixed input, which is the uncertainty of one member.
@@ -730,15 +815,51 @@ Thus unit cell smaller than $lambda_0/2$ doesn't really make that much sense.
   - The calibration ratio and coverage are accordingly computed against $sigma \/ sqrt(M)$, the expected spread of the mean, rather than against $sigma$. Comparing the error directly with $sigma$ would make a correctly behaving ensemble look conservative by a factor of $sqrt(M)$.
   - The members are not fully independent, since at $80 %$ geometry coverage two of them share about $64 %$ of their training geometries. The effective $M$ is therefore smaller than the nominal one, so the true reduction lies between $1$ and $sqrt(M)$; the spread remains an upper bound on the error of the mean rather than an estimate of it.
   - That the standard deviation of a bootstrap ensemble is not a calibrated prediction uncertainty, although it correlates with it and can be calibrated afterwards, is documented by @Hirsch2022. That deep ensembles do not necessarily improve calibration, and depend on subtle trade-offs, is shown by @Rahaman2021.
+
+=== Interpretation of Surrogate Statistics
+- The phase error is smallest at low `a` and grows towards the largest values
+  - So extrapolation towards the edge of the swept interval is weaker than interpolation in the middle.
+  - Per histogram in the dataset sections it's clear that the number of samples at the maximal values of a drops of dramatically.
+  - Only high ratios are able to reach high values of `a`.
+- Some configurations perform markedly worse
+  -  What extremely polutes the results is configuration $"ratio" = 1$.
+    - Especially at $epsilon_r = 4.5$ delivers one of the worst results. It's hard to pinpoint exact cause.
+    - This probably stems from the nature of what the dataset -- `ratio=1` configuration was used originally to map out promising regions of height which could be used for future design.
+    - Therefore, there are runs with relatively low count of samples and in heigh ranges where very few configurations were run.
+    - As `ratio=1` isn't interesting at all for the final design questionable perforamce here isn't really relevant and the datapoints at `ratio=1` are only used to provide an edge case for the model - so that low aspect ratio configurations will be functional - which as we can see is the case.
+    - When including `ratio=1` in evaluation the model will also have extremely large RMS at the top edge of `a` interval - over 10 degrees.
+    - Thus all of these configurations were removed from the statistics.
+  -  Anomalous perforamce of $epsilon_r = 7.5$ for `ratio=1.6` and `ratio=2.1`
+    - This points to a different problem and that is issue of the evaluation itself, respectively limits of the test dataset.
+    - For many configuration at $epsilon_r = 7.5$ there is a resonance within plausible range of `a` - as the sampling isn't necessarily that large the prediction fails on these.
+    - Looking at histograms of distribution of samples across different ratios it's apparent that ratios 1.5 and 1.6 share roughly the same number of samples - however in the test set 1.6 is overrepresented, while 1.5 is underrepresented.
+    - Thus it's possible that for 1.6 and 2.1 ratios in the dataset ended a unfavorable configurations with undersampled resonances which the model doesn't capture. While for 1.5 ratio the configuration that ended up in the dataset was one of lower height with rather shallow resonance.
+    - Therefore, all results for $epsilon_r=7.5$ should be taken with a grain of salt. The model will not struggle just on the two ratios above.
 - *Where the spread grows, the error follows.*
-  - Beyond roughly $2$~mm of `a`, corresponding to the more elongated cells, the spread increases sharply. This is the intended behaviour: those configurations are closer to resonance, the phase is steeper there, and the members disagree more.
+  - Beyond roughly $2$~mm of `a`, corresponding to the more elongated cells, the spread increases sharply. This is the intended behavior: those configurations are closer to resonance, the phase is steeper there, and the members disagree more.
   - For the inter-axis offset the error and the spread follow the same trend across the whole range, which is what makes the spread usable as a relative guide.
-  - For the absolute phase the two diverge at the largest `a`: the spread grows faster than the error. That is consistent with the members differing in *where* they place the resonance rather than in the overall level, so their disagreement is large while their average is comparatively accurate. It also means the spread should not be read as an error bar specifically in that region.
+  - For the absolute phase the two diverge at the largest `a`: the spread grows faster than the error.
+    - That is consistent with the members differing in where they place the resonance.
+    - Combination of two factors -- resonance is closer the closer to the edge of the `a` interval one is, and also as its' the edge of the interval with limited amount of samples the models start to extrapolate.
+    - MAE is quite good, however RMS quite closely copies the spread trend.
+    - There is a peak at around 2.3 - hard to explain, nothing in the dataset points that there should be problem specifically at this place. Could be combination of mutliple things - it's a `a` value achievable by quite a few ratios, but the results differ widely for different ratios. While lower `a` values have much fewer samples so it A) depends what runs end up in the test dataset B) the samples are just for 1 or 2 ratio configurations.
   - The calibration is weakest in the elongated, high-permittivity corner, closest to resonance: that is where the spread most understates the error, and where a prediction is most likely to be confidently wrong.
-- *The offset error behaves differently from the absolute phase error.*
-  - Reporting $Delta phi$ separately is essential, because the two axes can be wrong in compensating ways. A model that overestimates both phases by the same amount has a large absolute error and a correct offset, and only the offset error reveals that the CP condition is still satisfied.
-  - The offset error is consistently *smaller* than the absolute phase error, which indicates the two axes are partially correlated: the model captures the common part of the response and the offset follows.
-  - In the isotropic limit the offset becomes ill-conditioned, since $Delta phi$ is the difference of two nearly equal quantities. The offset error there is not meaningful and those cells are excluded as described above.
+- *What is problematic:* in these regions the ensemble spread isn't significantly larger. Ensembles start to diverge only at the edges of dataset where they don't agree how to extrapolate between data. When it comes to interpolation they deliver roughly same results even if bias is very large.
+
+
+#align(center)[
+  #figure(
+    image("../simulations/data/statistics/model/plot_error_vs_ratio.pdf", width: 82%),
+    caption: [Surrogate model perforamce in relation to `a/b ratio` computed per starta],
+  )
+]
+
+#align(center)[
+  #figure(
+    image("../simulations/data/statistics/model/plot_error_vs_a.pdf", width: 82%),
+    caption: [Surrogate model perforamce in relation to `a` computed per starta],
+  )
+]
 
 
 #pagebreak()
